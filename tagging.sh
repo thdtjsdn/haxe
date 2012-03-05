@@ -10,6 +10,6 @@ do
 	# exists in git
 	echo "${tags[@]}" | grep -qv "$tag"
 	if [ $? -eq 0 ]; then
-		git tag "$tag" "refs/remotes/tags/$tag" -m $tag;
+		git tag "$tag" "refs/remotes/tags/$tag" -m "$tag";
 	fi
 done
