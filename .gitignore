@@ -1,0 +1,93 @@
+# /
+*.cmi
+*.cmo
+*.cmx
+*.obj
+*.o
+*.a
+*.cmxa
+Prompt Visual Studio 2008.lnk
+bin
+build-all-vs.ml
+build-all.ml
+build-js.ml
+build-nolib.ml
+build-php-vs.ml
+build-php.ml
+build-swf.ml
+clean.bat
+haxe
+haxe.exe
+haxe.ncb
+haxe.suo
+haxedoc.exe
+haxelib.exe
+haxeserver.bat
+haxesetup.exe
+lexer.ml
+lib
+msvcr71.dll
+test
+updatelib.ml
+zlib
+
+# /doc/
+doc/files
+doc/haxe-release
+doc/*.zip
+doc/*.n
+doc/*.gz
+doc/hxinst-osx
+doc/hxinst-linux
+doc/hxclasses
+doc/*.swf
+doc/*.xml
+
+# /std/
+std/*.n
+std/*.xml
+std/*.swf
+std/all.js
+std/mt
+
+
+# /std/tools/haxedoc/
+std/tools/haxedoc/haxedoc
+std/tools/haxedoc/*.xml
+std/tools/haxedoc/*.n
+
+# /std/tools/haxelib/
+std/tools/haxelib/*.n
+std/tools/haxelib/*.zip
+std/tools/haxelib/*.bat
+std/tools/haxelib/haxelib
+std/tools/haxelib/test
+std/tools/haxelib/files
+std/tools/haxelib/tmp
+std/tools/haxelib/haxelib.db
+std/tools/haxelib/haxelib.exe
+
+# /std/tools/hxinst/
+std/tools/hxinst/hxinst-osx
+std/tools/hxinst/hxinst-linux
+std/tools/hxinst/hxinst-win.exe
+std/tools/hxinst/hxinst.n
+std/tools/hxinst/haXe
+std/tools/hxinst/Installer.app
+std/tools/hxinst/haXe Installer.app
+
+# /tests/unit/
+tests/unit/*.js
+tests/unit/*.n
+tests/unit/*.swf
+tests/unit/as3
+tests/unit/cpp
+tests/unit/php
+tests/unit/swfmake.xml
+tests/unit/unit.js.map
+
+# stuff from ocaml deps, patched by hippo
+CVS/
+ocaml/xml-light/xml_lexer.ml
+ocaml/xml-light/xml_parser.ml
+ocaml/xml-light/xml_parser.mli
