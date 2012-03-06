@@ -45,6 +45,7 @@ or as an attachment to Google code [issue tracker](http://code.google.com/p/haxe
 
 If you need to know which svn revision belongs to a git commit take a closer look at the commit messages, there is some
 metadata for every commit:
+<<<<<<< HEAD
 
 ```
 git-svn-id: http://haxe.googlecode.com/svn/trunk@$SVN_REVISION $GIT_COMMIT_HASH
@@ -104,3 +105,8 @@ Branches:
 ```
 git branch $GIT_BRANCH_NAME "ref/remotes/branches/$SVN_BRANCH_NAME"
 ```
+=======
+```
+git-svn-id: http://haxe.googlecode.com/svn/trunk@$SVN_REVISION $GIT_COMMIT_HASH
+```
+>>>>>>> typo
