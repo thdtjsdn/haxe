@@ -16,7 +16,7 @@ sudo apt-get install ocaml camlp4 ocaml-findlib zlib1g-dev
 
 (And of course git ;-)
 
-More information are available (here)[http://haxe.org/doc/build].
+More information are available [here](http://haxe.org/doc/build).
 
 ## Compile
 
