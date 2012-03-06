@@ -59,3 +59,27 @@ and adjusted to work with this repository. (no download, paths are a little diff
 Google Code. (Requires svn and cvs)
 * `tagging.sh` - Searches for tags on the svn trunk and creates missing git tags
 * `remove_tags.sh` - In case the script above failed
+
+## Setup a sync to SVN on your own
+
+This requires git-svn to be installed.
+
+```
+git svn init -s http://haxe.googlecode.com/svn
+```
+To make sure authors are mapped correctly edit your `.git/config` file and append (adjust the path to your git repository):
+```
+[svn]
+		authorsfile = /path/to/haxe/git/repository/authors
+```
+
+First time sync (needs to be done once, takes up to one hour):
+
+```
+git svn fetch
+```
+
+Later syncs could triggered by:
+```
+git svn rebase
+```
