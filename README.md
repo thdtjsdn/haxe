@@ -45,7 +45,6 @@ or as an attachment to Google code [issue tracker](http://code.google.com/p/haxe
 
 If you need to know which svn revision belongs to a git commit take a closer look at the commit messages, there is some
 metadata for every commit:
-<<<<<<< HEAD
 
 ```
 git-svn-id: http://haxe.googlecode.com/svn/trunk@$SVN_REVISION $GIT_COMMIT_HASH
@@ -105,18 +104,3 @@ Branches:
 ```
 git branch $GIT_BRANCH_NAME "ref/remotes/branches/$SVN_BRANCH_NAME"
 ```
-=======
-```
-git-svn-id: http://haxe.googlecode.com/svn/trunk@$SVN_REVISION $GIT_COMMIT_HASH
-``
-
-## Scripts
-
-There are few helper scripts in this repository:
-
-* `install.ml` - Compile the haXe compiler. It is taken from the haXe website ([install.ml](http://haxe.org/file/install.ml))
-and adjusted to work with this repository. (no download, paths are a little different.)
-* `download_lib.sh` - Download the dependencies from the Motiontwin CVS server (Ocaml libs) and some of the neko source from
-Google Code. (Requires svn and cvs)
-* `tagging.sh` - Searches for tags on the svn trunk and creates missing git tags
-* `remove_tags.sh` - In case the script above failed
