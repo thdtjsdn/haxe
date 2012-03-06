@@ -40,7 +40,7 @@ I am also open for suggestions here ;-)
 ## Patches
 
 There is currently no way to give patches back to the haXe compiler team from this repository. If you use this
-hack on the haXe compiler you need to create patches and send them to the [mailing list](https://groups.google.com/forum/#!forum/haxelang)
+to hack on the haXe compiler you need to create patches and send them to the [mailing list](https://groups.google.com/forum/#!forum/haxelang)
 or as an attachment to Google code [issue tracker](http://code.google.com/p/haxe/issues/list).
 
 If you need to know which svn revision belongs to a git commit take a closer look at the commit messages, there is some
