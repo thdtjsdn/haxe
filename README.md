@@ -45,6 +45,7 @@ or as an attachment to Google code [issue tracker](http://code.google.com/p/haxe
 
 If you need to know which svn revision belongs to a git commit take a closer look at the commit messages, there is some
 metadata for every commit:
+
 ```
 git-svn-id: http://haxe.googlecode.com/svn/trunk@$SVN_REVISION $GIT_COMMIT_HASH
 ```
@@ -62,12 +63,15 @@ Google Code. (Requires svn and cvs)
 
 ## Setup a sync to SVN on your own
 
+In case you want to sync your local clone by your self.  
 This requires git-svn to be installed.
 
 ```
 git svn init -s http://haxe.googlecode.com/svn
 ```
+
 To make sure authors are mapped correctly edit your `.git/config` file and append (adjust the path to your git repository):
+
 ```
 [svn]
 		authorsfile = /path/to/haxe/git/repository/authors
@@ -80,6 +84,23 @@ git svn fetch
 ```
 
 Later syncs could triggered by:
+
 ```
 git svn rebase
+```
+
+### Create git tags/branches from SVN tags/branches
+
+Take a look at `tagging.sh`. Tags and (currently not existing) branches are mapped to `remotes/tags` and `remote/branches`, so in a nutshell:
+
+Tags:
+
+```
+git tag -a "$GIT_TAG_NAME" "refs/remotes/tags/$SVN_TAG_NAME" -m "$TAG_MESSAGE"
+```
+
+Branches:
+
+```
+git branch $GIT_BRANCH_NAME "ref/remotes/branches/$SVN_BRANCH_NAME"
 ```
