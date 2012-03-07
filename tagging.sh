@@ -13,3 +13,4 @@ do
 		git tag "$tag" "refs/remotes/tags/$tag" -m "$tag";
 	fi
 done
+
