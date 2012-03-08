@@ -83,12 +83,6 @@ First time sync (needs to be done once, takes up to one hour):
 git svn fetch
 ```
 
-Later syncs could triggered by:
-
-```
-git svn rebase
-```
-
 ### Create git tags/branches from SVN tags/branches
 
 Take a look at `tagging.sh`. Tags and (currently not existing) branches are mapped to `remotes/tags` and `remote/branches`, so in a nutshell:
