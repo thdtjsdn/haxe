@@ -63,6 +63,7 @@ type context = {
 	mutable load_extern_type : (path -> pos -> (string * Ast.package) option) list; (* allow finding types which are not in sources *)
 	mutable filters : (unit -> unit) list;
 	mutable defines_signature : string option;
+	mutable print : string -> unit;
 	(* output *)
 	mutable file : string;
 	mutable flash_version : float;
@@ -83,6 +84,7 @@ type context = {
 exception Abort of string * Ast.pos
 
 let display_default = ref false
+let default_print = ref print_string
 
 let create v =
 	let m = Type.mk_mono() in
@@ -94,6 +96,7 @@ let create v =
 		foptimize = true;
 		dead_code_elimination = false;
 		platform = Cross;
+		print = !default_print;
 		std_path = [];
 		class_path = [];
 		main_class = None;
@@ -126,6 +129,9 @@ let create v =
 			tarray = (fun _ -> assert false);
 		};
 	}
+
+let log com str =
+	if com.verbose then com.print (str ^ "\n")
 
 let clone com =
 	let t = com.basic in
@@ -219,10 +225,14 @@ let close t =
 		| [] -> assert false
 		| s :: l -> t.start <- l; s
 	) in
-	let dt = get_time() -. start in
+	let now = get_time() in
+	let dt = now -. start in
 	t.total <- t.total +. dt;
-	curtime := List.tl !curtime;
-	List.iter (fun ct -> ct.start <- List.map (fun t -> t +. dt) ct.start) !curtime
+	(match !curtime with
+	| [] -> assert false
+	| tt :: l -> if t == tt then curtime := l else failwith ("Closing " ^ t.name ^ " while " ^ tt.name ^ " in use"));	
+	(* because of rounding errors while adding small times, we need to make sure that we don't have start > now *)
+	List.iter (fun ct -> ct.start <- List.map (fun t -> let s = t +. dt in if s > now then now else s) ct.start) !curtime
 
 let timer name =
 	let t = new_timer name in

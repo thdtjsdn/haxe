@@ -96,6 +96,14 @@ let complete_fields fields =
 	Buffer.add_string b "</list>\n";
 	raise (Completion (Buffer.contents b))
 
+let report_times print =
+	let tot = ref 0. in
+	Hashtbl.iter (fun _ t -> tot := !tot +. t.total) Common.htimers;
+	print (Printf.sprintf "Total time : %.3fs" !tot);
+	print "------------------------------------";
+	let timers = List.sort (fun t1 t2 -> compare t1.name t2.name) (Hashtbl.fold (fun _ t acc -> t :: acc) Common.htimers []) in
+	List.iter (fun t -> print (Printf.sprintf "  %s : %.3fs, %.0f%%" t.name t.total (t.total *. 100. /. !tot))) timers
+
 let file_extension f =
 	let cl = ExtString.String.nsplit f "." in
 	match List.rev cl with
@@ -393,12 +401,12 @@ and wait_loop boot_com host port =
 			data
 	);
 	let cache_module sign m =
-		Hashtbl.replace cache.c_modules (m.Type.mpath,sign) (file_time m.Type.mfile,m);
+		Hashtbl.replace cache.c_modules (m.Type.m_path,sign) (file_time m.Type.m_file,m);
 		List.iter (fun t ->
 			match t with
 			| Type.TClassDecl c -> c.Type.cl_restore()
 			| _ -> ()
-		) m.Type.mtypes
+		) m.Type.m_types
 	in
 	let modules_added = Hashtbl.create 0 in
 	Typeload.type_module_hook := (fun (ctx:Typecore.typer) mpath p ->
@@ -408,38 +416,38 @@ and wait_loop boot_com host port =
 		let dep = ref None in
 		let rec check m =
 			try
-				Hashtbl.find modules_added m.Type.mpath
+				Hashtbl.find modules_added m.Type.m_path
 			with Not_found -> try
-				!(Hashtbl.find modules_checked m.Type.mpath)
+				!(Hashtbl.find modules_checked m.Type.m_path)
 			with Not_found ->
 			let ok = ref true in
-			Hashtbl.add modules_checked m.Type.mpath ok;
+			Hashtbl.add modules_checked m.Type.m_path ok;
 			try
-				let time, m = Hashtbl.find cache.c_modules (m.Type.mpath,sign) in
-				if m.Type.mfile <> Common.get_full_path (Typeload.resolve_module_file com2 m.Type.mpath (ref[]) p) then raise Not_found;
-				if file_time m.Type.mfile <> time then raise Not_found;
-				PMap.iter (fun m2 _ -> if not (check m2) then begin dep := Some m2; raise Not_found end) !(m.Type.mdeps);
+				let time, m = Hashtbl.find cache.c_modules (m.Type.m_path,sign) in
+				if m.Type.m_file <> Common.get_full_path (Typeload.resolve_module_file com2 m.Type.m_path (ref[]) p) then raise Not_found;
+				if file_time m.Type.m_file <> time then raise Not_found;
+				PMap.iter (fun m2 _ -> if not (check m2) then begin dep := Some m2; raise Not_found end) !(m.Type.m_deps);
 				true
 			with Not_found ->
-				Hashtbl.add modules_added m.Type.mpath false;
+				Hashtbl.add modules_added m.Type.m_path false;
 				ok := false;
 				!ok
 		in
 		let rec add_modules m =
-			if Hashtbl.mem modules_added m.Type.mpath then
+			if Hashtbl.mem modules_added m.Type.m_path then
 				()
 			else begin
-				Hashtbl.add modules_added m.Type.mpath true;
-				if verbose then print_endline ("Reusing  cached module " ^ Ast.s_type_path m.Type.mpath);
+				Hashtbl.add modules_added m.Type.m_path true;
+				if verbose then print_endline ("Reusing  cached module " ^ Ast.s_type_path m.Type.m_path);
 				Typeload.add_module ctx m p;
-				PMap.iter (fun m2 _ -> add_modules m2) !(m.Type.mdeps);
+				PMap.iter (fun m2 _ -> add_modules m2) !(m.Type.m_deps);
 			end
 		in
 		try
 			let _, m = Hashtbl.find cache.c_modules (mpath,sign) in
 			if com2.dead_code_elimination then raise Not_found;
 			if not (check m) then begin
-				if verbose then print_endline ("Skipping cached module " ^ Ast.s_type_path mpath ^ (match !dep with None -> "" | Some m -> "(" ^ Ast.s_type_path m.Type.mpath ^ ")"));
+				if verbose then print_endline ("Skipping cached module " ^ Ast.s_type_path mpath ^ (match !dep with None -> "" | Some m -> "(" ^ Ast.s_type_path m.Type.m_path ^ ")"));
 				raise Not_found;
 			end;
 			add_modules m;
@@ -470,7 +478,7 @@ and wait_loop boot_com host port =
 				List.iter (cache_module (get_signature ctx.com)) ctx.com.modules;
 				if verbose then print_endline ("Cached " ^ string_of_int (List.length ctx.com.modules) ^ " modules");
 			end;
-			List.iter (fun s -> ssend sin (s ^ "\n")) (List.rev ctx.messages);
+			List.iter (fun s -> ssend sin (s ^ "\n"); if verbose then print_endline ("> " ^ s)) (List.rev ctx.messages);
 		in
 		(try
 			let data = parse_hxml_data (read_loop()) in
@@ -478,13 +486,16 @@ and wait_loop boot_com host port =
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
 				Common.display_default := false;
+				Common.default_print := ssend sin;
 				Parser.resume_display := Ast.null_pos;
 				measure_times := false;
 				Hashtbl.clear Common.htimers;
-				let _ = Common.timer "other" in
+				let other = Common.timer "other" in
 				Hashtbl.clear modules_added;
 				start_time := get_time();
-				process_params flush [] data
+				process_params flush [] data;
+				other();
+				if !measure_times then report_times (fun s -> ssend sin (s ^ "\n"))
 			with Completion str ->
 				if verbose then print_endline ("Completion Response =\n" ^ str);
 				ssend sin str
@@ -510,7 +521,7 @@ and do_connect host port args =
 		if b > 0 then loop()
 	in
 	loop();
-	prerr_endline (Buffer.contents buf)
+	prerr_string (Buffer.contents buf)
 
 and init flush ctx =
 	let usage = Printf.sprintf
@@ -807,7 +818,7 @@ try
 	if !classes = [([],"Std")] && not !force_typing then begin
 		if !cmds = [] && not !did_something then Arg.usage basic_args_spec usage;
 	end else begin
-		if com.verbose then print_endline ("Classpath : " ^ (String.concat ";" com.class_path));
+		Common.log com ("Classpath : " ^ (String.concat ";" com.class_path));
 		let t = Common.timer "typing" in
 		Typecore.type_expr_ref := (fun ctx e need_val -> Typer.type_expr ~need_val ctx e);
 		let tctx = Typer.create com in
@@ -835,7 +846,7 @@ try
 		| Some "hx" ->
 			Genxml.generate_hx com
 		| Some file ->
-			if com.verbose then print_endline ("Generating xml : " ^ com.file);
+			Common.log com ("Generating xml : " ^ com.file);
 			Genxml.generate com file);
 		if com.platform = Flash9 || com.platform = Cpp then List.iter (Codegen.fix_overrides com) com.types;
 		if Common.defined com "dump" then Codegen.dump_types com;
@@ -852,22 +863,22 @@ try
 		| Cross ->
 			()
 		| Flash | Flash9 when !gen_as3 ->
-			if com.verbose then print_endline ("Generating AS3 in : " ^ com.file);
+			Common.log com ("Generating AS3 in : " ^ com.file);
 			Genas3.generate com;
 		| Flash | Flash9 ->
-			if com.verbose then print_endline ("Generating swf : " ^ com.file);
+			Common.log com ("Generating swf : " ^ com.file);
 			Genswf.generate com !swf_header;
 		| Neko ->
-			if com.verbose then print_endline ("Generating neko : " ^ com.file);
+			Common.log com ("Generating neko : " ^ com.file);
 			Genneko.generate com;
 		| Js ->
-			if com.verbose then print_endline ("Generating js : " ^ com.file);
+			Common.log com ("Generating js : " ^ com.file);
 			Genjs.generate com
 		| Php ->
-			if com.verbose then print_endline ("Generating PHP in : " ^ com.file);
+			Common.log com ("Generating PHP in : " ^ com.file);
 			Genphp.generate com;
 		| Cpp ->
-			if com.verbose then print_endline ("Generating Cpp in : " ^ com.file);
+			Common.log com ("Generating Cpp in : " ^ com.file);
 			Gencpp.generate com;
 		);
 	end;
@@ -942,14 +953,14 @@ with
 			try
 				let ctx = Typer.create com in
 				let m = Typeload.load_module ctx (p,c) Ast.null_pos in
-				complete_fields (List.map (fun t -> snd (Type.t_path t),"","") (List.filter (fun t -> not (Type.t_infos t).Type.mt_private) m.Type.mtypes))
+				complete_fields (List.map (fun t -> snd (Type.t_path t),"","") (List.filter (fun t -> not (Type.t_infos t).Type.mt_private) m.Type.m_types))
 			with _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
 	| e when (try Sys.getenv "OCAMLRUNPARAM" <> "b" with _ -> true) ->
 		error ctx (Printexc.to_string e) Ast.null_pos
 
 ;;
-let all = Common.timer "other" in
+let other = Common.timer "other" in
 Sys.catch_break true;
 (try
 	process_params default_flush [] (List.tl (Array.to_list Sys.argv));
@@ -957,14 +968,5 @@ with Completion c ->
 	prerr_endline c;
 	exit 0
 );
-all();
-if !measure_times then begin
-	let tot = ref 0. in
-	Hashtbl.iter (fun _ t -> tot := !tot +. t.total) Common.htimers;
-	Printf.eprintf "Total time : %.3fs\n" !tot;
-	Printf.eprintf "------------------------------------\n";
-	let timers = List.sort (fun t1 t2 -> compare t1.name t2.name) (Hashtbl.fold (fun _ t acc -> t :: acc) Common.htimers []) in
-	List.iter (fun t ->
-		Printf.eprintf "  %s : %.3fs, %.0f%%\n" t.name t.total (t.total *. 100. /. !tot);
-	) timers;
-end;
+other();
+if !measure_times then report_times prerr_endline
