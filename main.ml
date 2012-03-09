@@ -398,6 +398,9 @@ and wait_loop boot_com host port =
 			| _ -> ()
 		) m.m_types
 	in
+	let check_module_path com m p =
+		m.m_extra.m_file = Common.get_full_path (Typeload.resolve_module_file com m.m_path (ref[]) p)
+	in
 	let modules_added = Hashtbl.create 0 in
 	Typeload.type_module_hook := (fun (ctx:Typecore.typer) mpath p ->
 		let com2 = ctx.Typecore.com in
@@ -407,7 +410,9 @@ and wait_loop boot_com host port =
 		let dep = ref None in
 		let rec check m =
 			try
-				Hashtbl.find added m.m_id
+				(match Hashtbl.find added m.m_id with
+				| None -> true
+				| x -> dep := x; false)
 			with Not_found -> try
 				!(Hashtbl.find modules_checked m.m_id)
 			with Not_found ->
@@ -415,12 +420,19 @@ and wait_loop boot_com host port =
 			Hashtbl.add modules_checked m.m_id ok;
 			try
 				let m = Hashtbl.find cache.c_modules (m.m_path,m.m_extra.m_sign) in
-				if m.m_extra.m_kind <> MFake && m.m_extra.m_file <> Common.get_full_path (Typeload.resolve_module_file com2 m.m_path (ref[]) p) then raise Not_found;
+				(match m.m_extra.m_kind with
+				| MFake -> () (* don't get classpath *)
+				| MCode -> if not (check_module_path com2 m p) then raise Not_found;
+				| MMacro when ctx.Typecore.in_macro -> if not (check_module_path com2 m p) then raise Not_found;
+				| MMacro ->
+					let _, mctx = Typer.get_macro_context ctx p in
+					if not (check_module_path mctx.Typecore.com m p) then raise Not_found;
+				);
 				if file_time m.m_extra.m_file <> m.m_extra.m_time then raise Not_found;
 				PMap.iter (fun _ m2 -> if not (check m2) then begin dep := Some m2; raise Not_found end) m.m_extra.m_deps;
 				true
 			with Not_found ->
-				Hashtbl.add added m.m_id false;
+				Hashtbl.add added m.m_id (match !dep with None -> Some m | x -> x);
 				ok := false;
 				!ok
 		in
@@ -428,14 +440,15 @@ and wait_loop boot_com host port =
 			if Hashtbl.mem added m.m_id then
 				()
 			else begin
-				Hashtbl.add added m.m_id true;
+				Hashtbl.add added m.m_id None;
 				(match m0.m_extra.m_kind, m.m_extra.m_kind with
-				| MCode, MMacro | MMacro, MCode -> 
+				| MCode, MMacro | MMacro, MCode ->
 					(* this was just a dependency to check : do not add to the context *)
 					()
 				| _ ->
 					if verbose then print_endline ("Reusing  cached module " ^ Ast.s_type_path m.m_path);
 					Typeload.add_module ctx m p;
+					PMap.iter (Hashtbl.add com2.resources) m.m_extra.m_binded_res;
 					PMap.iter (fun _ m2 -> add_modules m0 m2) m.m_extra.m_deps);
 			end
 		in
@@ -576,8 +589,8 @@ try
 		Common.init_platform com pf;
 		com.file <- file;
 		Unix.putenv "__file__" file;
-		Unix.putenv "__platform__" file;
-		if (pf = Flash || pf = Flash9) && file_extension file = "swc" then Common.define com "swc";
+		Unix.putenv "__platform__" (platform_name pf);
+		if (pf = Flash8 || pf = Flash) && file_extension file = "swc" then Common.define com "swc";
 	in
 	let define f = Arg.Unit (fun () -> Common.define com f) in
 	let basic_args_spec = [
@@ -587,10 +600,9 @@ try
 			com.class_path <- normalize_path (expand_env path) :: com.class_path
 		),"<path> : add a directory to find source files");
 		("-js",Arg.String (set_platform Js),"<file> : compile code to JavaScript file");
-		("-swf",Arg.String (set_platform Flash),"<file> : compile code to Flash SWF file");
+		("-swf",Arg.String (set_platform Flash8),"<file> : compile code to Flash SWF file");
 		("-as3",Arg.String (fun dir ->
 			set_platform Flash dir;
-			if com.flash_version < 9. then com.flash_version <- 9.;
 			gen_as3 := true;
 			Common.define com "as3";
 			Common.define com "no_inline";
@@ -762,7 +774,6 @@ try
 		),"<dir> : set current working directory");
 		("-swf9",Arg.String (fun file ->
 			set_platform Flash file;
-			if com.flash_version < 9. then com.flash_version <- 9.;
 		),"<file> : [deprecated] compile code to Flash9 SWF file");
 	] in
 	let current = ref 0 in
@@ -787,7 +798,7 @@ try
 			(* no platform selected *)
 			set_platform Cross "";
 			"?"
-		| Flash | Flash9 ->
+		| Flash8 | Flash ->
 			if com.flash_version >= 9. then begin
 				let rec loop = function
 					| [] -> ()
@@ -797,13 +808,17 @@ try
 						loop l
 				in
 				loop Common.flash_versions;
-				com.package_rules <- PMap.add "flash" (Directory "flash9") com.package_rules;
-				com.package_rules <- PMap.add "flash9" Forbidden com.package_rules;
-				com.platform <- Flash9;
-				add_std "flash9";
-			end else begin
-				Common.define com ("flash" ^ string_of_int (int_of_float com.flash_version));
+				Common.define com "flash";
+				com.defines <- PMap.remove "flash8" com.defines;
+				com.package_rules <- PMap.remove "flash" com.package_rules;
 				add_std "flash";
+			end else begin
+				com.package_rules <- PMap.add "flash" (Directory "flash8") com.package_rules;
+				com.package_rules <- PMap.add "flash8" Forbidden com.package_rules;
+				Common.define com "flash";
+				Common.define com ("flash" ^ string_of_int (int_of_float com.flash_version));
+				com.platform <- Flash8;
+				add_std "flash8";
 			end;
 			"swf"
 		| Neko -> add_std "neko"; "n"
@@ -822,6 +837,7 @@ try
 		if !cmds = [] && not !did_something then Arg.usage basic_args_spec usage;
 	end else begin
 		Common.log com ("Classpath : " ^ (String.concat ";" com.class_path));
+		Common.log com ("Defines : " ^ (String.concat ";" (PMap.foldi (fun v _ acc -> v :: acc) com.defines [])));
 		let t = Common.timer "typing" in
 		Typecore.type_expr_ref := (fun ctx e need_val -> Typer.type_expr ~need_val ctx e);
 		let tctx = Typer.create com in
@@ -851,7 +867,7 @@ try
 		| Some file ->
 			Common.log com ("Generating xml : " ^ com.file);
 			Genxml.generate com file);
-		if com.platform = Flash9 || com.platform = Cpp then List.iter (Codegen.fix_overrides com) com.types;
+		if com.platform = Flash || com.platform = Cpp then List.iter (Codegen.fix_overrides com) com.types;
 		if Common.defined com "dump" then Codegen.dump_types com;
 		t();
 		(match com.platform with
@@ -865,10 +881,10 @@ try
 			end;
 		| Cross ->
 			()
-		| Flash | Flash9 when !gen_as3 ->
+		| Flash8 | Flash when !gen_as3 ->
 			Common.log com ("Generating AS3 in : " ^ com.file);
 			Genas3.generate com;
-		| Flash | Flash9 ->
+		| Flash8 | Flash ->
 			Common.log com ("Generating swf : " ^ com.file);
 			Genswf.generate com !swf_header;
 		| Neko ->

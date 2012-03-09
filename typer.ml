@@ -185,7 +185,7 @@ let rec unify_call_params ctx name el args r p inline =
 	let rec loop acc l l2 skip =
 		match l , l2 with
 		| [] , [] ->
-			if not (inline && ctx.g.doinline) && (match ctx.com.platform with Flash | Flash9 | Js -> true | _ -> false) then
+			if not (inline && ctx.g.doinline) && (match ctx.com.platform with Flash8 | Flash | Js -> true | _ -> false) then
 				List.rev (no_opt acc), r
 			else
 				List.rev (List.map fst acc), r
@@ -413,7 +413,7 @@ let field_access ctx mode f t e p =
 				normal()
 		| AccCall m ->
 			if m = ctx.curmethod && (match e.eexpr with TConst TThis -> true | TTypeExpr (TClassDecl c) when c == ctx.curclass -> true | _ -> false) then
-				let prefix = (match ctx.com.platform with Flash9 when Common.defined ctx.com "as3" -> "$" | _ -> "") in
+				let prefix = (match ctx.com.platform with Flash when Common.defined ctx.com "as3" -> "$" | _ -> "") in
 				AKExpr (mk (TField (e,prefix ^ f.cf_name)) t p)
 			else if mode = MSet then
 				AKSet (e,m,t,f.cf_name)
@@ -577,7 +577,7 @@ let rec type_field ctx e i p mode =
 		in
 		(try
 			let t , f = class_field c i in
-			if e.eexpr = TConst TSuper && (match f.cf_kind with Var _ -> true | _ -> false) && Common.platform ctx.com Flash9 then error "Cannot access superclass variable for calling : needs to be a proper method" p;
+			if e.eexpr = TConst TSuper && (match f.cf_kind with Var _ -> true | _ -> false) && Common.platform ctx.com Flash then error "Cannot access superclass variable for calling : needs to be a proper method" p;
 			if not f.cf_public && not (is_parent c ctx.curclass) && not ctx.untyped then display_error ctx ("Cannot access to private field " ^ i) p;
 			field_access ctx mode f (apply_params c.cl_types params t) e p
 		with Not_found -> try
@@ -623,7 +623,7 @@ let rec type_field ctx e i p mode =
 			field_access ctx mode f (field_type f) e p
 		)
 	| TMono r ->
-		if ctx.untyped && (match ctx.com.platform with Flash -> Common.defined ctx.com "swf-mark" | _ -> false) then ctx.com.warning "Mark" p;
+		if ctx.untyped && (match ctx.com.platform with Flash8 -> Common.defined ctx.com "swf-mark" | _ -> false) then ctx.com.warning "Mark" p;
 		let f = {
 			cf_name = i;
 			cf_type = mk_mono();
@@ -2392,6 +2392,7 @@ let make_macro_api ctx p =
 						m_deps = PMap.empty;
 						m_processed = 0;
 						m_kind = MFake;
+						m_binded_res = PMap.empty;
 					};
 				} in
 				Hashtbl.add fake_modules file mdep;
@@ -2400,7 +2401,51 @@ let make_macro_api ctx p =
 			add_dependency m mdep;
 			Hashtbl.replace ctx.g.modules mdep.m_path mdep
 		);
+		Interp.current_module = (fun() ->
+			ctx.current
+		);
 	}
+
+let get_macro_context ctx p =
+	let api = make_macro_api ctx p in
+	match ctx.g.macros with
+	| Some (select,ctx) ->
+		select();
+		api, ctx
+	| None ->
+		let com2 = Common.clone ctx.com in
+		ctx.com.get_macros <- (fun() -> Some com2);
+		com2.package_rules <- PMap.empty;
+		com2.main_class <- None;
+		com2.display <- false;
+		com2.dead_code_elimination <- false;
+		List.iter (fun p -> com2.defines <- PMap.remove (platform_name p) com2.defines) platforms;
+		com2.defines_signature <- None;
+		com2.class_path <- List.filter (fun s -> not (ExtString.String.exists s "/_std/")) com2.class_path;
+		com2.class_path <- List.map (fun p -> p ^ "neko" ^ "/_std/") com2.std_path @ com2.class_path;
+		com2.defines <- PMap.foldi (fun k _ acc ->
+			match k with
+			| "no_traces" -> acc
+			| _ when List.exists (fun (_,d) -> "flash" ^ d = k) Common.flash_versions -> acc
+			| _ -> PMap.add k () acc
+		) com2.defines PMap.empty;
+		Common.define com2 "macro";
+		Common.init_platform com2 Neko;
+		let ctx2 = ctx.g.do_create com2 in
+		let mctx = Interp.create com2 api in
+		let on_error = com2.error in
+		com2.error <- (fun e p -> Interp.set_error mctx true; on_error e p);
+		let macro = ((fun() -> Interp.select mctx), ctx2) in
+		ctx.g.macros <- Some macro;
+		ctx2.g.macros <- Some macro;
+		(* ctx2.g.core_api <- ctx.g.core_api; // causes some issues because of optional args and Null type in Flash9 *)
+		ignore(Typeload.load_module ctx2 (["haxe";"macro"],"Expr") p);
+		ignore(Typeload.load_module ctx2 (["haxe";"macro"],"Type") p);
+		finalize ctx2;
+		let _, types, _ = generate ctx2 in
+		Interp.add_types mctx types;
+		Interp.init mctx;
+		api, ctx2
 
 let load_macro ctx cpath f p =
 	(*
@@ -2409,46 +2454,7 @@ let load_macro ctx cpath f p =
 		typing the classes needed for macro execution.
 	*)
 	let t = macro_timer ctx "typing (+init)" in
-	let api = make_macro_api ctx p in
-	let ctx2 = (match ctx.g.macros with
-		| Some (select,ctx) ->
-			select();
-			ctx
-		| None ->
-			let com2 = Common.clone ctx.com in
-			ctx.com.get_macros <- (fun() -> Some com2);
-			com2.package_rules <- PMap.empty;
-			com2.main_class <- None;
-			com2.display <- false;
-			com2.dead_code_elimination <- false;
-			List.iter (fun p -> com2.defines <- PMap.remove (platform_name p) com2.defines) platforms;
-			com2.defines_signature <- None;
-			com2.class_path <- List.filter (fun s -> not (ExtString.String.exists s "/_std/")) com2.class_path;
-			com2.class_path <- List.map (fun p -> p ^ "neko" ^ "/_std/") com2.std_path @ com2.class_path;
-			com2.defines <- PMap.foldi (fun k _ acc ->
-				match k with
-				| "no_traces" -> acc
-				| _ when List.exists (fun (_,d) -> "flash" ^ d = k) Common.flash_versions -> acc
-				| _ -> PMap.add k () acc
-			) com2.defines PMap.empty;
-			Common.define com2 "macro";
-			Common.init_platform com2 Neko;
-			let ctx2 = ctx.g.do_create com2 in
-			let mctx = Interp.create com2 api in
-			let on_error = com2.error in
-			com2.error <- (fun e p -> Interp.set_error mctx true; on_error e p);
-			let macro = ((fun() -> Interp.select mctx), ctx2) in
-			ctx.g.macros <- Some macro;
-			ctx2.g.macros <- Some macro;
-			(* ctx2.g.core_api <- ctx.g.core_api; // causes some issues because of optional args and Null type in Flash9 *)
-			ignore(Typeload.load_module ctx2 (["haxe";"macro"],"Expr") p);
-			ignore(Typeload.load_module ctx2 (["haxe";"macro"],"Type") p);
-			finalize ctx2;
-			let _, types, _ = generate ctx2 in
-			Interp.add_types mctx types;
-			Interp.init mctx;
-			ctx2
-	) in
+	let api, ctx2 = get_macro_context ctx p in
 	let mctx = Interp.get_ctx() in
 	let m = (try Hashtbl.find ctx.g.types_module cpath with Not_found -> cpath) in
 	let mloaded = Typeload.load_module ctx2 m p in
@@ -2677,7 +2683,7 @@ let rec create com =
 		| TTypeDecl td ->
 			(match snd td.t_path with
 			| "Null" ->
-				let f9 = platform com Flash9 in
+				let f9 = platform com Flash in
 				let cpp = platform com Cpp in
 				ctx.t.tnull <- if not (f9 || cpp) then (fun t -> t) else (fun t -> if is_nullable t then TType (td,[t]) else t);
 			| _ -> ());

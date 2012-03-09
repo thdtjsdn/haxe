@@ -25,12 +25,13 @@
 
 @:core_api class Reflect {
 
-	public inline static function hasField( o : Dynamic, field : String ) : Bool untyped {
-		return __this__["hasOwnProperty"]["call"](o,field);
+	public static function hasField( o : Dynamic, field : String ) : Bool untyped {
+		return o.hasOwnProperty( field );
 	}
 
-	public inline static function field( o : Dynamic, field : String ) : Dynamic untyped {
-		return o[field];
+	public static function field( o : Dynamic, field : String ) : Dynamic untyped {
+		// sealed classes will throw an exception
+		return try o[field] catch( e : Dynamic ) null;
 	}
 
 	public inline static function setField( o : Dynamic, field : String, value : Dynamic ) : Void untyped {
@@ -46,41 +47,52 @@
 	}
 
 	public inline static function callMethod( o : Dynamic, func : Dynamic, args : Array<Dynamic> ) : Dynamic untyped {
-		return func["apply"](o,args);
+		return func.apply(o,args);
 	}
 
 	public static function fields( o : Dynamic ) : Array<String> untyped {
 		if( o == null ) return new Array();
-		var a : Array<String> = __keys__(o);
 		var i = 0;
-		while( i < a.length ) {
-			if( !a["hasOwnProperty"]["call"](o,a[i]) )
-				a.splice(i,1);
-			else
-				++i;
+		var a = [];
+		while( untyped __has_next__(o,i) ) {
+			var prop = untyped __forin__(o,i);
+			if( o.hasOwnProperty(prop) )
+				a.push(prop);
 		}
 		return a;
 	}
 
 	public static function isFunction( f : Dynamic ) : Bool untyped {
-		return __typeof__(f) == "function" && f.__name__ == null;
+		return __typeof__(f) == "function";
 	}
 
 	public static function compare<T>( a : T, b : T ) : Int {
-		return ( a == b ) ? 0 : (((cast a) > (cast b)) ? 1 : -1);
+		var a : Dynamic = a;
+		var b : Dynamic = b;
+		return ( a == b ) ? 0 : ((a > b) ? 1 : -1);
 	}
 
 	public static function compareMethods( f1 : Dynamic, f2 : Dynamic ) : Bool {
-		return untyped f1 == f2 || (f1["f"] == f2["f"] && f1["o"] == f2["o"] && f1["f"] != null);
+		return f1 == f2; // VM-level closures
 	}
 
 	public static function isObject( v : Dynamic ) : Bool untyped {
+		if( v == null )
+			return false;
 		var t = __typeof__(v);
-		return (t == "string" || (t == "object" && !v.__enum__) || (t == "function" && v.__name__ != null));
+		if( t == "object" ) {
+			try {
+				if( v.__enum__ == true )
+					return false;
+			} catch( e : Dynamic ) {
+			}
+			return true;
+		}
+		return (t == "string");
 	}
 
 	public static function deleteField( o : Dynamic, f : String ) : Bool untyped {
-		if( __this__["hasOwnProperty"]["call"](o,f) != true ) return false;
+		if( o.hasOwnProperty(f) != true ) return false;
 		__delete__(o,f);
 		return true;
 	}
@@ -93,7 +105,7 @@
 	}
 
 	public static function makeVarArgs( f : Array<Dynamic> -> Dynamic ) : Dynamic {
-		return function() { return f(untyped __arguments__); };
+		return function(__arguments__) { return f(__arguments__); };
 	}
 
 }
