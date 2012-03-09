@@ -19,6 +19,7 @@
 open Printf
 open Genswf
 open Common
+open Type
 
 type context = {
 	com : Common.context;
@@ -31,7 +32,7 @@ type context = {
 type cache = {
 	mutable c_haxelib : (string list, string list) Hashtbl.t;
 	mutable c_files : (string, float * Ast.package) Hashtbl.t;
-	mutable c_modules : (Type.path * string, float * Type.module_def) Hashtbl.t;
+	mutable c_modules : (path * string, module_def) Hashtbl.t;
 }
 
 exception Abort
@@ -202,7 +203,7 @@ let delete_file f = try Sys.remove f with _ -> ()
 
 let expand_env path =
 	let r = Str.regexp "%\\([A-Za-z0-9_]+\\)%" in
-	Str.global_substitute r (fun s -> try Sys.getenv (Str.matched_group 1 s) with Not_found -> "") path
+	Str.global_substitute r (fun s -> let key = Str.matched_group 1 s in try Sys.getenv key with Not_found -> "%" ^ key ^ "%") path
 
 let unquote v =
 	let len = String.length v in
@@ -374,17 +375,6 @@ and wait_loop boot_com host port =
 		c_modules = Hashtbl.create 0;
 	} in
 	global_cache := Some cache;
-	let get_signature com =
-		match com.defines_signature with
-		| Some s -> s
-		| None ->
-			let s = Digest.string (String.concat "@" (PMap.foldi (fun k _ acc -> if k = "display" then acc else k :: acc) com.defines [])) in
-			com.defines_signature <- Some s;
-			s
-	in
-	let file_time file =
-		try (Unix.stat file).Unix.st_mtime with _ -> 0.
-	in
 	Typeload.parse_hook := (fun com2 file p ->
 		let sign = get_signature com2 in
 		let ffile = Common.get_full_path file in
@@ -400,57 +390,63 @@ and wait_loop boot_com host port =
 			Hashtbl.replace cache.c_files fkey (ftime,data);
 			data
 	);
-	let cache_module sign m =
-		Hashtbl.replace cache.c_modules (m.Type.m_path,sign) (file_time m.Type.m_file,m);
+	let cache_module m =
+		Hashtbl.replace cache.c_modules (m.m_path,m.m_extra.m_sign) m;
 		List.iter (fun t ->
 			match t with
-			| Type.TClassDecl c -> c.Type.cl_restore()
+			| TClassDecl c -> c.cl_restore()
 			| _ -> ()
-		) m.Type.m_types
+		) m.m_types
 	in
 	let modules_added = Hashtbl.create 0 in
 	Typeload.type_module_hook := (fun (ctx:Typecore.typer) mpath p ->
 		let com2 = ctx.Typecore.com in
 		let sign = get_signature com2 in
+		let added = (try Hashtbl.find modules_added sign with Not_found -> let added = Hashtbl.create 0 in Hashtbl.add modules_added sign added; added) in
 		let modules_checked = Hashtbl.create 0 in
 		let dep = ref None in
 		let rec check m =
 			try
-				Hashtbl.find modules_added m.Type.m_path
+				Hashtbl.find added m.m_id
 			with Not_found -> try
-				!(Hashtbl.find modules_checked m.Type.m_path)
+				!(Hashtbl.find modules_checked m.m_id)
 			with Not_found ->
 			let ok = ref true in
-			Hashtbl.add modules_checked m.Type.m_path ok;
+			Hashtbl.add modules_checked m.m_id ok;
 			try
-				let time, m = Hashtbl.find cache.c_modules (m.Type.m_path,sign) in
-				if m.Type.m_file <> Common.get_full_path (Typeload.resolve_module_file com2 m.Type.m_path (ref[]) p) then raise Not_found;
-				if file_time m.Type.m_file <> time then raise Not_found;
-				PMap.iter (fun m2 _ -> if not (check m2) then begin dep := Some m2; raise Not_found end) !(m.Type.m_deps);
+				let m = Hashtbl.find cache.c_modules (m.m_path,m.m_extra.m_sign) in
+				if m.m_extra.m_kind <> MFake && m.m_extra.m_file <> Common.get_full_path (Typeload.resolve_module_file com2 m.m_path (ref[]) p) then raise Not_found;
+				if file_time m.m_extra.m_file <> m.m_extra.m_time then raise Not_found;
+				PMap.iter (fun _ m2 -> if not (check m2) then begin dep := Some m2; raise Not_found end) m.m_extra.m_deps;
 				true
 			with Not_found ->
-				Hashtbl.add modules_added m.Type.m_path false;
+				Hashtbl.add added m.m_id false;
 				ok := false;
 				!ok
 		in
-		let rec add_modules m =
-			if Hashtbl.mem modules_added m.Type.m_path then
+		let rec add_modules m0 m =
+			if Hashtbl.mem added m.m_id then
 				()
 			else begin
-				Hashtbl.add modules_added m.Type.m_path true;
-				if verbose then print_endline ("Reusing  cached module " ^ Ast.s_type_path m.Type.m_path);
-				Typeload.add_module ctx m p;
-				PMap.iter (fun m2 _ -> add_modules m2) !(m.Type.m_deps);
+				Hashtbl.add added m.m_id true;
+				(match m0.m_extra.m_kind, m.m_extra.m_kind with
+				| MCode, MMacro | MMacro, MCode -> 
+					(* this was just a dependency to check : do not add to the context *)
+					()
+				| _ ->
+					if verbose then print_endline ("Reusing  cached module " ^ Ast.s_type_path m.m_path);
+					Typeload.add_module ctx m p;
+					PMap.iter (fun _ m2 -> add_modules m0 m2) m.m_extra.m_deps);
 			end
 		in
 		try
-			let _, m = Hashtbl.find cache.c_modules (mpath,sign) in
+			let m = Hashtbl.find cache.c_modules (mpath,sign) in
 			if com2.dead_code_elimination then raise Not_found;
 			if not (check m) then begin
-				if verbose then print_endline ("Skipping cached module " ^ Ast.s_type_path mpath ^ (match !dep with None -> "" | Some m -> "(" ^ Ast.s_type_path m.Type.m_path ^ ")"));
+				if verbose then print_endline ("Skipping cached module " ^ Ast.s_type_path mpath ^ (match !dep with None -> "" | Some m -> "(" ^ Ast.s_type_path m.m_path ^ ")"));
 				raise Not_found;
 			end;
-			add_modules m;
+			add_modules m m;
 			Some m
 		with Not_found ->
 			None
@@ -472,12 +468,18 @@ and wait_loop boot_com host port =
 				ignore(Unix.select [] [] [] 0.1);
 				read_loop()
 		in
+		let rec cache_context com =
+			if not com.dead_code_elimination then begin
+				List.iter cache_module com.modules;
+				if verbose then print_endline ("Cached " ^ string_of_int (List.length com.modules) ^ " modules");
+			end;
+			match com.get_macros() with
+			| None -> ()
+			| Some com -> cache_context com
+		in
 		let flush ctx =
 			Hashtbl.clear modules_added;
-			if not ctx.com.dead_code_elimination then begin
-				List.iter (cache_module (get_signature ctx.com)) ctx.com.modules;
-				if verbose then print_endline ("Cached " ^ string_of_int (List.length ctx.com.modules) ^ " modules");
-			end;
+			cache_context ctx.com;
 			List.iter (fun s -> ssend sin (s ^ "\n"); if verbose then print_endline ("> " ^ s)) (List.rev ctx.messages);
 		in
 		(try
@@ -489,12 +491,13 @@ and wait_loop boot_com host port =
 				Common.default_print := ssend sin;
 				Parser.resume_display := Ast.null_pos;
 				measure_times := false;
+				close_times();
 				Hashtbl.clear Common.htimers;
-				let other = Common.timer "other" in
+				let _ = Common.timer "other" in
 				Hashtbl.clear modules_added;
 				start_time := get_time();
 				process_params flush [] data;
-				other();
+				close_times();
 				if !measure_times then report_times (fun s -> ssend sin (s ^ "\n"))
 			with Completion str ->
 				if verbose then print_endline ("Completion Response =\n" ^ str);
@@ -546,7 +549,7 @@ try
 	com.warning <- (fun msg p -> message ctx ("Warning : " ^ msg) p);
 	com.error <- error ctx;
 	Parser.display_error := (fun e p -> com.error (Parser.error_msg e) p);
-	Parser.use_doc := !Common.display_default;
+	Parser.use_doc := !Common.display_default || (!global_cache <> None);
 	(try
 		let p = Sys.getenv "HAXE_LIBRARY_PATH" in
 		let rec loop = function
@@ -913,15 +916,10 @@ with
 	| Arg.Help msg ->
 		print_string msg
 	| Typer.DisplayFields fields ->
-		let ctx = Type.print_context() in
-		let fields = List.map (fun (name,t,doc) -> name, Type.s_type ctx t, (match doc with None -> "" | Some d -> d)) fields in
+		let ctx = print_context() in
+		let fields = List.map (fun (name,t,doc) -> name, s_type ctx t, (match doc with None -> "" | Some d -> d)) fields in
 		let fields = if !measure_times then begin
-			let rec loop() =
-				match !curtime with
-				| [] -> ()
-				| _ -> close_time(); loop();
-			in
-			loop();
+			close_times();
 			let tot = ref 0. in
 			Hashtbl.iter (fun _ t -> tot := !tot +. t.total) Common.htimers;
 			let fields = ("@TOTAL", Printf.sprintf "%.3fs" (get_time() -. !start_time), "") :: fields in
@@ -933,11 +931,11 @@ with
 		in
 		complete_fields fields
 	| Typer.DisplayTypes tl ->
-		let ctx = Type.print_context() in
+		let ctx = print_context() in
 		let b = Buffer.create 0 in
 		List.iter (fun t ->
 			Buffer.add_string b "<type>\n";
-			Buffer.add_string b (htmlescape (Type.s_type ctx t));
+			Buffer.add_string b (htmlescape (s_type ctx t));
 			Buffer.add_string b "\n</type>\n";
 		) tl;
 		raise (Completion (Buffer.contents b))
@@ -953,7 +951,7 @@ with
 			try
 				let ctx = Typer.create com in
 				let m = Typeload.load_module ctx (p,c) Ast.null_pos in
-				complete_fields (List.map (fun t -> snd (Type.t_path t),"","") (List.filter (fun t -> not (Type.t_infos t).Type.mt_private) m.Type.m_types))
+				complete_fields (List.map (fun t -> snd (t_path t),"","") (List.filter (fun t -> not (t_infos t).mt_private) m.m_types))
 			with _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
 	| e when (try Sys.getenv "OCAMLRUNPARAM" <> "b" with _ -> true) ->

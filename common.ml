@@ -64,6 +64,7 @@ type context = {
 	mutable filters : (unit -> unit) list;
 	mutable defines_signature : string option;
 	mutable print : string -> unit;
+	mutable get_macros : unit -> context option;
 	(* output *)
 	mutable file : string;
 	mutable flash_version : float;
@@ -117,6 +118,7 @@ let create v =
 		js_gen = None;
 		load_extern_type = [];
 		defines_signature = None;
+		get_macros = (fun() -> None);
 		warning = (fun _ _ -> assert false);
 		error = (fun _ _ -> assert false);
 		basic = {
@@ -136,6 +138,18 @@ let log com str =
 let clone com =
 	let t = com.basic in
 	{ com with basic = { t with tvoid = t.tvoid }; main_class = None; }
+
+let file_time file =
+	try (Unix.stat file).Unix.st_mtime with _ -> 0.
+
+let get_signature com =
+	match com.defines_signature with
+	| Some s -> s
+	| None ->
+		let str = String.concat "@" (PMap.foldi (fun k _ acc -> if k = "display" || k = "use_rtti_doc" then acc else k :: acc) com.defines []) in
+		let s = Digest.string str in
+		com.defines_signature <- Some s;
+		s
 
 let platforms = [
 	Flash;
@@ -239,7 +253,8 @@ let timer name =
 	curtime := t :: !curtime;
 	(function() -> close t)
 
-let rec close_time() =
+let rec close_times() =
 	match !curtime with
 	| [] -> ()
-	| t :: _ -> close t
+	| t :: _ -> close t; close_times()
+
