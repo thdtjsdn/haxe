@@ -2587,6 +2587,7 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 			| None -> (fun() -> raise Interp.Abort)
 			| Some e -> Interp.eval mctx (Genneko.gen_expr mctx.Interp.gen (type_expr ctx e))
 		) in
+		ctx.current.m_extra.m_time <- -1.; (* disable caching for modules having macro-in-macro *)
 		let e = (EConst (Ident "__dollar__delay_call"),p) in
 		Some (EUntyped (ECall (e,[EConst (Int (string_of_int pos)),p]),p),p)
 	end else

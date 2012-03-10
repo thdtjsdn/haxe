@@ -494,6 +494,7 @@ and wait_loop boot_com host port =
 			Hashtbl.clear modules_added;
 			cache_context ctx.com;
 			List.iter (fun s -> ssend sin (s ^ "\n"); if verbose then print_endline ("> " ^ s)) (List.rev ctx.messages);
+			if ctx.has_error then ssend sin "\x02\n";
 		in
 		(try
 			let data = parse_hxml_data (read_loop()) in
@@ -501,7 +502,7 @@ and wait_loop boot_com host port =
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
 				Common.display_default := false;
-				Common.default_print := ssend sin;
+				Common.default_print := (fun str -> ssend sin ("\x01" ^ str));
 				Parser.resume_display := Ast.null_pos;
 				measure_times := false;
 				close_times();
@@ -537,7 +538,20 @@ and do_connect host port args =
 		if b > 0 then loop()
 	in
 	loop();
-	prerr_string (Buffer.contents buf)
+	let has_error = ref false in
+	let rec print line =
+		match (if line == "" then '\x00' else line.[0]) with
+		| '\x01' ->
+			print_endline (String.concat "" (ExtString.String.nsplit line "\x01"))
+		| '\x02' ->
+			has_error := true;
+		| _ ->
+			prerr_endline line;
+	in
+	let lines = ExtString.String.nsplit (Buffer.contents buf) "\n" in
+	let lines = (match List.rev lines with "" :: l -> List.rev l | _ -> lines) in
+	List.iter print lines;
+	if !has_error then exit 1
 
 and init flush ctx =
 	let usage = Printf.sprintf
@@ -600,7 +614,7 @@ try
 			com.class_path <- normalize_path (expand_env path) :: com.class_path
 		),"<path> : add a directory to find source files");
 		("-js",Arg.String (set_platform Js),"<file> : compile code to JavaScript file");
-		("-swf",Arg.String (set_platform Flash8),"<file> : compile code to Flash SWF file");
+		("-swf",Arg.String (set_platform Flash),"<file> : compile code to Flash SWF file");
 		("-as3",Arg.String (fun dir ->
 			set_platform Flash dir;
 			gen_as3 := true;
