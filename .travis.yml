@@ -1,5 +1,5 @@
 language: node_js
 node_js:
    - 0.4
-install: apt-get install ocaml camlp4 ocaml-findlib zlib1g-dev
+install: sudo apt-get install ocaml camlp4 ocaml-findlib zlib1g-dev
 script: ocaml install.ml
