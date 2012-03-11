@@ -124,6 +124,8 @@ type context = {
 	mutable do_string : value -> string;
 	mutable do_loadprim : value -> value -> value;
 	mutable do_compare : value -> value -> cmp;
+	mutable loader : value;
+	mutable exports : value;
 	(* runtime *)
 	mutable stack : value DynArray.t;
 	mutable callstack : callstack list;
@@ -169,12 +171,14 @@ let decode_type_ref = ref (fun t -> assert false)
 let encode_expr_ref = ref (fun e -> assert false)
 let decode_expr_ref = ref (fun e -> assert false)
 let enc_array_ref = ref (fun l -> assert false)
+let make_ast_ref = ref (fun _ -> assert false)
 let get_ctx() = (!get_ctx_ref)()
 let enc_array (l:value list) : value = (!enc_array_ref) l
 let encode_type (t:Type.t) : value = (!encode_type_ref) t
 let decode_type (v:value) : Type.t = (!decode_type_ref) v
 let encode_expr (e:Ast.expr) : value = (!encode_expr_ref) e
 let decode_expr (e:value) : Ast.expr = (!decode_expr_ref) e
+let make_ast (e:texpr) : Ast.expr = (!make_ast_ref) e
 
 let to_int f = int_of_float (mod_float f 2147483648.0)
 
@@ -208,6 +212,17 @@ let hash f =
 		h := !h * 223 + int_of_char (String.unsafe_get f i);
 	done;
 	!h
+
+let constants =
+	let h = Hashtbl.create 0 in
+	List.iter (fun f -> Hashtbl.add h (hash f) f) 
+	["done";"read";"write";"min";"max";"file";"args";"loadprim";"loadmodule";"__a";"__s";"h";
+    "tag";"index";"length";"message";"pack";"name";"params";"sub";"doc";"kind";"meta";"access";
+	"constraints";"opt";"type";"value";"ret";"expr";"field";"values";"get";"__string";"toString";
+	"$";"add";"remove";"has";"__t";"module";"isPrivate";"isPublic";"isExtern";"isInterface";"exclude";
+	"constructs";"names";"superClass";"interfaces";"fields";"statics";"constructor";"init";"t";
+	"gid";"uid";"atime";"mtime";"ctime";"dev";"ino";"nlink";"rdev";"size";"mode";"pos";"len"];
+	h
 
 let h_get = hash "__get" and h_set = hash "__set"
 and h_add = hash "__add" and h_radd = hash "__radd"
@@ -725,13 +740,6 @@ let builtins =
 	let h = Hashtbl.create 0 in
 	List.iter (fun (n,f) -> Hashtbl.add h n (VFunction f)) funcs;
 	List.iter (fun (n,v) -> Hashtbl.add h n v) vals;
-	let loader = obj hash [
-		"args",VArray [||];
-		"loadprim",VFunction (Fun2 (fun a b -> (get_ctx()).do_loadprim a b));
-		"loadmodule",VFunction (Fun2 (fun a b -> assert false));
-	] in
-	Hashtbl.add h "loader" (VObject loader);
-	Hashtbl.add h "exports" (VObject { ofields = [||]; oproto = None });
 	h
 
 (* ---------------------------------------------------------------------- *)
@@ -1969,6 +1977,20 @@ let macro_lib =
 				VNull
 			| _ -> error()
 		);
+		"get_typed_expr", Fun1 (fun e ->
+			match e with
+			| VAbstract (ATExpr e) ->
+				encode_expr (make_ast e)
+			| _ -> error()
+		);
+		"get_output", Fun0 (fun() ->
+			VString (ccom()).file
+		);
+		"set_output", Fun1 (fun s ->
+			match s with
+			| VString s -> (ccom()).file <- s; VNull
+			| _ -> error()
+		);
 	]
 
 (* ---------------------------------------------------------------------- *)
@@ -2025,6 +2047,10 @@ let rec eval ctx (e,p) =
 			let f = float_of_string f in
 			(fun() -> VFloat f)
 		| String s -> (fun() -> VString s)
+		| Builtin "loader" ->
+			(fun() -> ctx.loader)
+		| Builtin "exports" ->
+			(fun() -> ctx.exports)
 		| Builtin s ->
 			let b = (try Hashtbl.find builtins s with Not_found -> throw ctx p ("Builtin not found '" ^ s ^ "'")) in
 			(fun() -> b)
@@ -2792,6 +2818,11 @@ let alloc_delayed ctx f =
 	pos
 
 let create com api =
+	let loader = obj hash [
+		"args",VArray (Array.of_list (List.map (fun s -> VString s) com.args));
+		"loadprim",VFunction (Fun2 (fun a b -> (get_ctx()).do_loadprim a b));
+		"loadmodule",VFunction (Fun2 (fun a b -> assert false));
+	] in
 	let ctx = {
 		com = com;
 		gen = Genneko.new_context com true;
@@ -2813,7 +2844,7 @@ let create com api =
 		exc = [];
 		vthis = VNull;
 		venv = [||];
-		fields_cache = Hashtbl.create 0;
+		fields_cache = Hashtbl.copy constants;
 		(* api *)
 		do_call = Obj.magic();
 		do_string = Obj.magic();
@@ -2822,6 +2853,8 @@ let create com api =
 		(* context *)
 		curapi = api;
 		delayed = DynArray.create();
+		loader = VObject loader;
+		exports = VObject { ofields = [||]; oproto = None };
 	} in
 	ctx.do_call <- call ctx;
 	ctx.do_string <- to_string ctx 0;
@@ -3824,11 +3857,12 @@ let rec make_ast e =
 		| _ -> Some (mk_type t)
 	in
 	let eopt = function None -> None | Some e -> Some (make_ast e) in
+	let is_ident n = n.[0] < 'A' || n.[0] > 'Z' in
 	((match e.eexpr with
 	| TConst c ->
 		EConst (mk_const c)
-	| TLocal v -> EConst (Ident v.v_name)
-	| TEnumField (en,f) -> EField (mk_path en.e_path e.epos,f)
+	| TLocal v -> EConst (if is_ident v.v_name then Ident v.v_name else Type v.v_name)
+	| TEnumField (en,f) -> if is_ident f then EField (mk_path en.e_path e.epos,f) else EType (mk_path en.e_path e.epos,f)
 	| TArray (e1,e2) -> EArray (make_ast e1,make_ast e2)
 	| TBinop (op,e1,e2) -> EBinop (op, make_ast e1, make_ast e2)
 	| TField (e,f) | TClosure (e,f) -> EField (make_ast e, f)
@@ -3851,9 +3885,26 @@ let rec make_ast e =
 	| TIf (e,e1,e2) -> EIf (make_ast e,make_ast e1,eopt e2)
 	| TWhile (e1,e2,flag) -> EWhile (make_ast e1, make_ast e2, flag)
 	| TSwitch (e,cases,def) -> ESwitch (make_ast e,List.map (fun (vl,e) -> List.map make_ast vl, make_ast e) cases,eopt def)
-	| TMatch (e,en,cases,def) ->
+	| TMatch (e,(en,_),cases,def) ->		
 		let scases (idx,args,e) =
-			assert false
+			let p = e.epos in
+			let unused = (EConst (Ident "_"),p) in
+			let args = (match args with
+				| None -> None
+				| Some l -> Some (List.map (function None -> unused | Some v -> (EConst (if is_ident v.v_name then Ident v.v_name else Type v.v_name),p)) l)
+			) in
+			let mk_args n =
+				match args with 
+				| None -> [unused]
+				| Some args -> 
+					args @ Array.to_list (Array.make (n - List.length args) unused)
+			in
+			List.map (fun i -> 
+				let c = (try List.nth en.e_names i with _ -> assert false) in
+				let cfield = (try PMap.find c en.e_constrs with Not_found -> assert false) in
+				let c = (EConst (if is_ident c then Ident c else Type c),p) in
+				(match follow cfield.ef_type with TFun (eargs,_) -> (ECall (c,mk_args (List.length eargs)),p) | _ -> c)
+			) idx, make_ast e
 		in
 		ESwitch (make_ast e,List.map scases cases,eopt def)
 	| TTry (e,catches) -> ETry (make_ast e,List.map (fun (v,e) -> v.v_name, mk_type v.v_type, make_ast e) catches)
@@ -3865,6 +3916,7 @@ let rec make_ast e =
 	,e.epos)
 
 ;;
+make_ast_ref := make_ast;
 enc_array_ref := enc_array;
 encode_type_ref := encode_type;
 decode_type_ref := decode_type;
