@@ -23,17 +23,16 @@ open Common
 type pos = Ast.pos
 
 type sourcemap = {
-	mutable source_last_line : int;
-	mutable source_last_col : int;
-	mutable source_last_file : int;
-
-	mutable print_comma : bool;
-	mutable output_last_col : int;
-	mutable output_current_col : int;
-
 	sources : (string) DynArray.t;
 	sources_hash : (string, int) Hashtbl.t;
 	mappings : Buffer.t;
+
+	mutable source_last_line : int;
+	mutable source_last_col : int;
+	mutable source_last_file : int;
+	mutable print_comma : bool;
+	mutable output_last_col : int;
+	mutable output_current_col : int;
 }
 
 type ctx = {
@@ -42,6 +41,7 @@ type ctx = {
 	packages : (string list,unit) Hashtbl.t;
 	smap : sourcemap;
 	js_modern : bool;
+
 	mutable current : tclass;
 	mutable statics : (tclass * string * texpr) list;
 	mutable inits : texpr list;
@@ -185,12 +185,15 @@ let write_mappings ctx =
 	print ctx "\n//@ sourceMappingURL=%s.map" basefile;
 	let channel = open_out_bin (ctx.com.file ^ ".map") in
 	let sources = DynArray.to_list ctx.smap.sources in
+	let to_url file =
+		ExtString.String.map (fun c -> if c == '\\' then '/' else c) (Common.get_full_path file)
+	in
 	output_string channel "{\n";
 	output_string channel "\"version\":3,\n";
 	output_string channel ("\"file\":\"" ^ basefile ^ "\",\n");
 	output_string channel ("\"sourceRoot\":\"file://\",\n");
 	output_string channel ("\"sources\":[" ^
-		(String.concat "," (List.map (fun s -> "\"" ^ Common.get_full_path s ^ "\"") sources)) ^
+		(String.concat "," (List.map (fun s -> "\"" ^ to_url s ^ "\"") sources)) ^
 		"],\n");
 	output_string channel "\"names\":[],\n";
 	output_string channel "\"mappings\":\"";
