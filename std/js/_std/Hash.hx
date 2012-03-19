@@ -28,13 +28,7 @@
 	private var h : Dynamic;
 
 	public function new() : Void {
-		untyped {
-			h = __js__("{}");
-			if( h.__proto__ != null ) {
-				h.__proto__ = null;
-				__js__("delete")(h.__proto__);
-			}
-		}
+		h = untyped ( Object.create != null ) ? Object.create(null) : {};
 	}
 
 	public function set( key : String, value : T ) : Void {
@@ -46,19 +40,13 @@
 	}
 
 	public function exists( key : String ) : Bool {
-		try {
-			key = "$"+key;
-			return untyped this.hasOwnProperty.call(h,key);
-		}catch(e:Dynamic){
-			untyped __js__("for(var i in this.h) if( i == key ) return true");
-			return false;
-		}
+		return untyped Object.prototype.hasOwnProperty.call(h,"$"+key);
 	}
 
 	public function remove( key : String ) : Bool {
-		if( !exists(key) )
-			return false;
-		untyped __js__("delete")(h["$"+key]);
+		key = "$"+key;
+		if( untyped !Object.prototype.hasOwnProperty.call(h,key) ) return false;
+		untyped __js__("delete")(h[key]);
 		return true;
 	}
 
