@@ -25,6 +25,7 @@ let parse_file com file p =
 	let ch = (try open_in_bin file with _ -> error ("Could not open " ^ file) p) in
 	let t = Common.timer "parsing" in
 	Lexer.init file;
+	incr stats.s_files_parsed;
 	let data = (try Parser.parse com (Lexing.from_channel ch) with e -> close_in ch; t(); raise e) in
 	close_in ch;
 	t();
@@ -33,6 +34,7 @@ let parse_file com file p =
 
 let parse_hook = ref parse_file
 let type_module_hook = ref (fun _ _ _ -> None)
+let return_partial_type = ref false
 
 let type_function_param ctx t e opt p =
 	match e with
@@ -736,6 +738,7 @@ let build_module_def ctx mt meta fvars fbuild =
 		display_error ctx msg p
 
 let init_class ctx c p herits fields =
+	incr stats.s_classes_built;
 	let fields = patch_class ctx c fields in
 	let ctx = { ctx with type_params = c.cl_types } in
 	c.cl_extern <- List.mem HExtern herits;
@@ -889,11 +892,13 @@ let init_class ctx c p herits fields =
 					(fun() -> ())
 				| Some e ->
 					let r = exc_protect (fun r ->
-						r := (fun() -> t);
-						if ctx.com.verbose then Common.log ctx.com ("Typing " ^ s_type_path c.cl_path ^ "." ^ name);
-						mark_used cf;
-						cf.cf_expr <- Some (type_static_var ctx t e p);
-						cf.cf_type <- t;
+						if not !return_partial_type then begin
+							r := (fun() -> t);
+							if ctx.com.verbose then Common.log ctx.com ("Typing " ^ (if ctx.in_macro then "macro " else "") ^ s_type_path c.cl_path ^ "." ^ name);
+							mark_used cf;
+							cf.cf_expr <- Some (type_static_var ctx t e p);
+							cf.cf_type <- t;
+						end;
 						t
 					) in
 					bind_type cf r (snd e) false
@@ -973,21 +978,24 @@ let init_class ctx c p herits fields =
 				cf_params = params;
 			} in
 			let r = exc_protect (fun r ->
-				r := (fun() -> t);
-				if ctx.com.verbose then Common.log ctx.com ("Typing " ^ s_type_path c.cl_path ^ "." ^ name);
-				let e , fargs = type_function ctx args ret (if constr then FConstructor else if stat then FStatic else FMember) fd p in
-				let f = {
-					tf_args = fargs;
-					tf_type = ret;
-					tf_expr = e;
-				} in
-				if stat && name = "__init__" then
-					(match e.eexpr with
-					| TBlock [] | TBlock [{ eexpr = TConst _ }] | TConst _ | TObjectDecl [] -> ()
-					| _ -> c.cl_init <- Some e);
-				mark_used cf;
-				cf.cf_expr <- Some (mk (TFunction f) t p);
-				cf.cf_type <- t;
+				if not !return_partial_type then begin
+					r := (fun() -> t);
+					incr stats.s_methods_typed;
+					if ctx.com.verbose then Common.log ctx.com ("Typing " ^ (if ctx.in_macro then "macro " else "") ^ s_type_path c.cl_path ^ "." ^ name);
+					let e , fargs = type_function ctx args ret (if constr then FConstructor else if stat then FStatic else FMember) fd p in
+					let f = {
+						tf_args = fargs;
+						tf_type = ret;
+						tf_expr = e;
+					} in
+					if stat && name = "__init__" then
+						(match e.eexpr with
+						| TBlock [] | TBlock [{ eexpr = TConst _ }] | TConst _ | TObjectDecl [] -> ()
+						| _ -> c.cl_init <- Some e);
+					mark_used cf;
+					cf.cf_expr <- Some (mk (TFunction f) t p);
+					cf.cf_type <- t;
+				end;
 				t
 			) in
 			let delay = if ((c.cl_extern && not inline) || c.cl_interface) && cf.cf_name <> "__init__" then
@@ -1175,15 +1183,7 @@ let type_module ctx m file tdecls loadp =
 		m_id = alloc_mid();
 		m_path = m;
 		m_types = [];
-		m_extra = {
-			m_file = Common.get_full_path file;
-			m_sign = Common.get_signature ctx.com;
-			m_time = file_time file;
-			m_deps = PMap.empty;
-			m_processed = 0;
-			m_kind = if ctx.in_macro then MMacro else MCode;
-			m_binded_res = PMap.empty;
-		};
+		m_extra = module_extra (Common.get_full_path file) (Common.get_signature ctx.com) (file_time file) (if ctx.in_macro then MMacro else MCode);
 	} in
 	List.iter (fun (d,p) ->
 		match d with

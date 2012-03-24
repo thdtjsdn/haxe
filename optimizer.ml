@@ -815,10 +815,10 @@ let optimize_completion_expr e =
 			with Not_found ->
 				());
 			e
-		| EBinop (OpAssign,(EConst (Ident n | Type n),_),e) ->
+		| EBinop (OpAssign,(EConst (Ident n | Type n),_),esub) ->
 			(try
 				(match get_local n with
-				| None, None -> decl n None (Some e)
+				| None, None -> decl n None (Some esub)
 				| _ -> ())
 			with Not_found -> 
 				());
@@ -858,8 +858,30 @@ let optimize_completion_expr e =
 			let efor = loop efor in
 			old();
 			(EFor ((EIn (id,it),p),efor),p)
-		| ESwitch _ ->
+		| EReturn _ ->
+			typing_side_effect := true;
 			map e
+		| ESwitch (e,cases,def) ->
+			let e = loop e in			
+			let cases = List.map (fun (el,e) ->
+				let el = List.map loop el in
+				let old = save() in
+				List.iter (fun e ->
+					match fst e with
+					| ECall (_,pl) ->
+						List.iter (fun p ->
+							match fst p with
+							| EConst (Ident i | Type i) -> decl i None None (* sadly *)
+							| _ -> ()
+						) pl
+					| _ -> ()
+				) el;
+				let e = loop e in
+				old();
+				el, e
+			) cases in
+			let def = (match def with None -> None | Some e -> Some (loop e)) in
+			(ESwitch (e,cases,def),p)
 		| ETry (et,cl) ->
 			let et = loop et in
 			let cl = List.map (fun (n,t,e) ->
@@ -903,8 +925,8 @@ let optimize_completion_expr e =
 			in
 			(try
 				let e = subst_locals locals s in
-				let e = (EBlock [(EVars (List.rev !tmp_locals),p);e],p) in
-				raise (Return (EDisplay (e,call),p))
+				let e = (EBlock [(EVars (List.rev !tmp_locals),p);(EDisplay (e,call),p)],p) in
+				raise (Return e)
 			with Exit ->
 				map e)
 		| EDisplayNew _ ->
@@ -922,7 +944,7 @@ let optimize_completion c fields =
 		if cp.pmin = 0 || (f.cff_pos.pmin <= cp.pmin && f.cff_pos.pmax >= cp.pmax) then
 			let k = try (match f.cff_kind with
 				| FVar (t,Some e) -> FVar (t,Some (optimize_completion_expr e))
-				| FFun fn -> (match optimize_completion_expr (EFunction (None,fn),f.cff_pos) with (EFunction (None,fn),_) -> FFun fn | e -> FVar(None,Some e))
+				| FFun fn -> (match optimize_completion_expr (EFunction (None,fn),f.cff_pos) with (EFunction (None,fn),_) -> FFun fn | e -> FFun({ fn with f_expr = Some e; f_args = []; }))
 				| k -> k
 			) with Exit -> f.cff_kind in
 			{ f with cff_kind = k }
