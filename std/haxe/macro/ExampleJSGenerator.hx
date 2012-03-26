@@ -27,7 +27,7 @@ import haxe.macro.Type;
 import haxe.macro.Expr;
 using Lambda;
 
-class DefaultJSGenerator {
+class ExampleJSGenerator {
 
 	var api : JSGenApi;
 	var buf : StringBuf;
@@ -135,8 +135,9 @@ class DefaultJSGenerator {
 
 	function genClass( c : ClassType ) {
 		genPackage(c.pack);
+		api.setCurrentClass(c);
 		var p = getPath(c);
-		fprint("$p = ");
+		fprint("$p = $$hxClasses['$p'] = ");
 		if( c.constructor != null )
 			genExpr(c.constructor.get().expr);
 		else
@@ -177,7 +178,7 @@ class DefaultJSGenerator {
 		var p = getPath(e);
 		var names = p.split(".").map(api.quoteString).join(",");
 		var constructs = e.names.map(api.quoteString).join(",");
-		fprint("$p = { __ename__ : [$names], __constructs__ : [$constructs] }");
+		fprint("$p = $$hxClasses['$p'] = { __ename__ : [$names], __constructs__ : [$constructs] }");
 		newline();
 		for( c in e.constructs.keys() ) {
 			var c = e.constructs.get(c);
@@ -257,7 +258,7 @@ class DefaultJSGenerator {
 
 	#if macro
 	public static function use() {
-		Compiler.setCustomJSGenerator(function(api) new DefaultJSGenerator(api).generate());
+		Compiler.setCustomJSGenerator(function(api) new ExampleJSGenerator(api).generate());
 	}
 	#end
 
