@@ -242,16 +242,17 @@ let parse_hxml file =
 	IO.close_in ch;
 	parse_hxml_data data
 
-let lookup_classes com fpath =
-	let spath = String.lowercase fpath in
+let lookup_classes com spath =	
 	let rec loop = function
 		| [] -> []
 		| cp :: l ->
 			let cp = (if cp = "" then "./" else cp) in
-			let c = normalize_path (Common.get_full_path cp) in
+			let c = normalize_path (Common.unique_full_path cp) in
 			let clen = String.length c in
-			if clen < String.length fpath && String.sub spath 0 clen = String.lowercase c then begin
-				let path = String.sub fpath clen (String.length fpath - clen) in
+			if clen < String.length spath && String.sub spath 0 clen = c then begin
+				let path = String.sub spath clen (String.length spath - clen) in
+				(* make sure the completion filename is capitalized - needed for Windows *)
+				let path = String.concat "/" (match List.rev (ExtString.String.nsplit path "/") with name :: l -> List.rev (String.capitalize name :: l) | [] -> []) in
 				(try [make_path path] with _ -> loop l)
 			end else
 				loop l
@@ -392,7 +393,7 @@ and wait_loop boot_com host port =
 	global_cache := Some cache;
 	Typeload.parse_hook := (fun com2 file p ->
 		let sign = get_signature com2 in
-		let ffile = Common.get_full_path file in
+		let ffile = Common.unique_full_path file in
 		let ftime = file_time ffile in
 		let fkey = ffile ^ "!" ^ sign in
 		try
@@ -424,7 +425,7 @@ and wait_loop boot_com host port =
 		) m.m_types
 	in
 	let check_module_path com m p =
-		m.m_extra.m_file = Common.get_full_path (Typeload.resolve_module_file com m.m_path (ref[]) p)
+		m.m_extra.m_file = Common.unique_full_path (Typeload.resolve_module_file com m.m_path (ref[]) p)
 	in
 	let compilation_step = ref 0 in
 	let compilation_mark = ref 0 in
@@ -797,7 +798,7 @@ try
 				Common.define com "display";
 				Parser.use_doc := true;
 				Parser.resume_display := {
-					Ast.pfile = Common.get_full_path file;
+					Ast.pfile = Common.unique_full_path file;
 					Ast.pmin = pos;
 					Ast.pmax = pos;
 				};
@@ -1048,12 +1049,25 @@ with
 				error ctx ("No classes found in " ^ String.concat "." p) Ast.null_pos
 			else
 				complete_fields (List.map (fun f -> f,"","") (packs @ classes))
-		| Some c ->
+		| Some (c,cur_package) ->
 			try
 				let ctx = Typer.create com in
-				let m = Typeload.load_module ctx (p,c) Ast.null_pos in
+				let rec lookup p = 
+					try
+						Typeload.load_module ctx (p,c) Ast.null_pos
+					with e ->
+						if cur_package then 
+							match List.rev p with
+							| [] -> raise e
+							| _ :: p -> lookup (List.rev p)
+						else
+							raise e
+				in
+				let m = lookup p in
 				complete_fields (List.map (fun t -> snd (t_path t),"","") (List.filter (fun t -> not (t_infos t).mt_private) m.m_types))
-			with _ ->
+			with Completion c ->
+				raise (Completion c)
+			| _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
 	| e when (try Sys.getenv "OCAMLRUNPARAM" <> "b" with _ -> true) ->
 		error ctx (Printexc.to_string e) Ast.null_pos

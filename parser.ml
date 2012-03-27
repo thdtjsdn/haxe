@@ -28,7 +28,7 @@ type error_msg =
 	| Custom of string
 
 exception Error of error_msg * pos
-exception TypePath of string list * string option
+exception TypePath of string list * (string * bool) option
 exception Display of expr
 
 let error_msg = function
@@ -75,7 +75,7 @@ let display e = raise (Display e)
 
 let is_resuming p =
 	let p2 = !resume_display in
-	p.pmax = p2.pmin && String.lowercase (Common.get_full_path p.pfile) = String.lowercase p2.pfile
+	p.pmax = p2.pmin && Common.unique_full_path p.pfile = p2.pfile
 
 let precedence op =
 	let left = true and right = false in
@@ -170,22 +170,22 @@ let semicolon s =
 let rec	parse_file s =
 	doc := None;
 	match s with parser
-	| [< '(Kwd Package,_); p = parse_package; _ = semicolon; l = parse_type_decls []; '(Eof,_) >] -> p , l
-	| [< l = parse_type_decls []; '(Eof,_) >] -> [] , l
+	| [< '(Kwd Package,_); p = parse_package; _ = semicolon; l = parse_type_decls p []; '(Eof,_) >] -> p , l
+	| [< l = parse_type_decls [] []; '(Eof,_) >] -> [] , l
 
-and parse_type_decls acc s =
+and parse_type_decls pack acc s =
 	try
 		match s with parser
-		| [< v = parse_type_decl; l = parse_type_decls (v :: acc) >] -> l
+		| [< v = parse_type_decl; l = parse_type_decls pack (v :: acc) >] -> l
 		| [< >] -> List.rev acc
-	with (TypePath ([],Some name)) as e ->
+	with TypePath ([],Some (name,false)) ->
 		(* resolve imports *)
 		List.iter (fun d ->
 			match fst d with
-			| EImport t when (t.tsub = None && t.tname = name) -> raise (TypePath (t.tpackage,Some t.tname))
+			| EImport t when (t.tsub = None && t.tname = name) -> raise (TypePath (t.tpackage,Some (name,false)))
 			| _ -> ()
 		) acc;
-		raise e
+		raise (TypePath (pack,Some(name,true)))
 
 and parse_type_decl s =
 	match s with parser
@@ -366,7 +366,7 @@ and parse_type_path1 pack = parser
 		let sub = (match s with parser
 			| [< '(Dot,p); s >] ->
 				(if is_resuming p then
-					raise (TypePath (List.rev pack,Some name))
+					raise (TypePath (List.rev pack,Some (name,false)))
 				else match s with parser
 					| [< '(Const (Type name),_) >] -> Some name
 					| [< >] -> serror())
