@@ -478,6 +478,7 @@ and wait_loop boot_com host port =
 					Typeload.add_module ctx m p;
 					PMap.iter (Hashtbl.add com2.resources) m.m_extra.m_binded_res;
 					PMap.iter (fun _ m2 -> add_modules m0 m2) m.m_extra.m_deps);
+					List.iter (Typer.call_init_macro ctx) m.m_extra.m_macro_calls
 			end
 		in
 		try
@@ -526,9 +527,8 @@ and wait_loop boot_com host port =
 			ctx.flush <- (fun() ->
 				incr compilation_step;
 				compilation_mark := !mark_loop;
-				cache_context ctx.com;
 				List.iter (fun s -> ssend sin (s ^ "\n"); if verbose then print_endline ("> " ^ s)) (List.rev ctx.messages);
-				if ctx.has_error then ssend sin "\x02\n";
+				if ctx.has_error then ssend sin "\x02\n" else cache_context ctx.com;
 			);
 			ctx.setup <- (fun() ->
 				Parser.display_error := (fun e p -> has_parse_error := true; ctx.com.error (Parser.error_msg e) p);
@@ -541,6 +541,7 @@ and wait_loop boot_com host port =
 					Hashtbl.iter (fun _ m -> if m.m_extra.m_file = file then m.m_extra.m_dirty <- true) cache.c_modules
 				end
 			);
+			ctx.com.print <- (fun str -> ssend sin ("\x01" ^ String.concat "\x01" (ExtString.String.nsplit str "\n") ^ "\n"));
 			ctx
 		in
 		(try
@@ -549,7 +550,6 @@ and wait_loop boot_com host port =
 			if verbose then print_endline ("Processing Arguments [" ^ String.concat "," data ^ "]");
 			(try
 				Common.display_default := false;
-				Common.default_print := (fun str -> ssend sin ("\x01" ^ str));
 				Parser.resume_display := Ast.null_pos;
 				Typeload.return_partial_type := false;
 				measure_times := false;
@@ -605,9 +605,9 @@ and do_connect host port args =
 	loop();
 	let has_error = ref false in
 	let rec print line =
-		match (if line == "" then '\x00' else line.[0]) with
+		match (if line = "" then '\x00' else line.[0]) with
 		| '\x01' ->
-			print_endline (String.concat "" (ExtString.String.nsplit line "\x01"))
+			print_string (String.concat "\n" (List.tl (ExtString.String.nsplit line "\x01")))
 		| '\x02' ->
 			has_error := true;
 		| _ ->
@@ -992,8 +992,19 @@ try
 		let len = String.length cmd in
 		if len > 3 && String.sub cmd 0 3 = "cd " then
 			Sys.chdir (String.sub cmd 3 (len - 3))
-		else
-			if Sys.command cmd <> 0 then failwith "Command failed";
+		else begin
+			let binary_string s =
+				if Sys.os_type = "Windows" || Sys.os_type = "Cygwin" then s else String.concat "\n" (ExtString.String.nsplit s "\r\n")
+			in
+			let pout, pin, perr = Unix.open_process_full cmd (Unix.environment()) in
+			let serr = binary_string (IO.read_all (IO.input_channel perr)) in
+			let sout = binary_string (IO.read_all (IO.input_channel pout)) in
+			if serr <> "" then ctx.messages <- (if serr.[String.length serr - 1] = '\n' then String.sub serr 0 (String.length serr - 1) else serr) :: ctx.messages;
+			if sout <> "" then ctx.com.print sout;
+			match Unix.close_process_full (pout,pin,perr) with
+			| Unix.WEXITED e -> if e <> 0 then failwith ("Command failed with error " ^ string_of_int e)
+			| Unix.WSIGNALED s | Unix.WSTOPPED s -> failwith ("Command stopped with signal " ^ string_of_int s)
+		end;
 		t();
 	) (List.rev !cmds)
 with
