@@ -374,6 +374,8 @@ and parse_type_path1 pack = parser
 					raise (TypePath (List.rev pack,Some (name,false)))
 				else match s with parser
 					| [< '(Const (Type name),_) >] -> Some name
+					| [< '(Binop OpOr,_) when do_resume() >] ->
+						raise (TypePath (List.rev pack,Some (name,false)))
 					| [< >] -> serror())
 			| [< >] -> None
 		) in
@@ -387,6 +389,8 @@ and parse_type_path1 pack = parser
 			tparams = params;
 			tsub = sub;
 		}
+	| [< '(Binop OpOr,_) when do_resume() >] ->
+		raise (TypePath (List.rev pack,None))
 
 and type_name = parser
 	| [< '(Const (Type name),_) >] -> name
@@ -787,20 +791,26 @@ and parse_call_params ec s =
 and parse_macro_cond allow_op s =
 	match s with parser
 	| [< '(Const (Ident t | Type t),p) >] ->
-		let e = (EConst (Ident t),p) in
-		if not allow_op then
-			None, e
-		else (match Stream.peek s with
-			| Some (Binop op,_) ->
-				Stream.junk s;
-				let tk, e2 = (try parse_macro_cond true s with Stream.Failure -> serror()) in
-				tk, make_binop op e e2
-			| tk ->
-				tk, e);
+		parse_macro_ident allow_op t p s
+	| [< '(Kwd k,p) >] ->
+		parse_macro_ident allow_op (s_keyword k) p s
 	| [< '(POpen, p1); _,e = parse_macro_cond true; '(PClose, p2) >] ->
 		None, (EParenthesis e,punion p1 p2)
 	| [< '(Unop op,p); tk, e = parse_macro_cond allow_op >] ->
 		tk, make_unop op e p
+
+and parse_macro_ident allow_op t p s =
+	let e = (EConst (Ident t),p) in
+	if not allow_op then
+		None, e
+	else match Stream.peek s with
+		| Some (Binop op,_) ->
+			Stream.junk s;
+			let tk, e2 = (try parse_macro_cond true s with Stream.Failure -> serror()) in
+			tk, make_binop op e e2
+		| tk ->
+			tk, e
+
 
 and toplevel_expr s =
 	try

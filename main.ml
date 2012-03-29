@@ -242,18 +242,21 @@ let parse_hxml file =
 	IO.close_in ch;
 	parse_hxml_data data
 
-let lookup_classes com spath =	
+let lookup_classes com spath =
 	let rec loop = function
 		| [] -> []
 		| cp :: l ->
 			let cp = (if cp = "" then "./" else cp) in
-			let c = normalize_path (Common.unique_full_path cp) in
+			let c =  Extc.get_real_path (Common.unique_full_path (normalize_path cp)) in
 			let clen = String.length c in
 			if clen < String.length spath && String.sub spath 0 clen = c then begin
 				let path = String.sub spath clen (String.length spath - clen) in
-				(* make sure the completion filename is capitalized - needed for Windows *)
-				let path = String.concat "/" (match List.rev (ExtString.String.nsplit path "/") with name :: l -> List.rev (String.capitalize name :: l) | [] -> []) in
-				(try [make_path path] with _ -> loop l)
+				(try
+					let path = make_path path in
+					(match loop l with
+					| [x] when String.length (Ast.s_type_path x) < String.length (Ast.s_type_path path) -> [x]
+					| _ -> [path])
+				with _ -> loop l)
 			end else
 				loop l
 	in
@@ -869,7 +872,10 @@ try
 		com.warning <- message ctx;
 		com.error <- error ctx;
 		com.main_class <- None;
-		classes := lookup_classes com (!Parser.resume_display).Ast.pfile;
+		let real = Extc.get_real_path (!Parser.resume_display).Ast.pfile in
+		classes := lookup_classes com real;
+		Common.log com ("Display file : " ^ real);
+		Common.log com ("Classes found : ["  ^ (String.concat "," (List.map Ast.s_type_path !classes)) ^ "]");
 	end;
 	let add_std dir =
 		com.class_path <- List.filter (fun s -> not (List.mem s com.std_path)) com.class_path @ List.map (fun p -> p ^ dir ^ "/_std/") com.std_path @ com.std_path
@@ -1063,11 +1069,11 @@ with
 		| Some (c,cur_package) ->
 			try
 				let ctx = Typer.create com in
-				let rec lookup p = 
+				let rec lookup p =
 					try
 						Typeload.load_module ctx (p,c) Ast.null_pos
 					with e ->
-						if cur_package then 
+						if cur_package then
 							match List.rev p with
 							| [] -> raise e
 							| _ :: p -> lookup (List.rev p)
