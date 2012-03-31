@@ -57,20 +57,6 @@ let mk_infos ctx p params =
 			("methodName", (EConst (String ctx.curmethod),p)) :: params
 	) ,p)
 
-let check_locals_masking ctx e =
-	let path = (match e.eexpr with
-		| TEnumField (e,_)
-		| TTypeExpr (TEnumDecl e) ->
-			Some e.e_path
-		| TTypeExpr (TClassDecl c) ->
-			Some c.cl_path
-		| _ -> None
-	) in
-	match path with
-	| Some ([],name) | Some (name::_,_) when PMap.mem name ctx.locals ->
-		error ("Local variable '" ^ name ^ "' is preventing usage of this type here") e.epos;
-	| _ -> ()
-
 let check_assign ctx e =
 	match e.eexpr with
 	| TLocal _ | TArray _ | TField _ ->
@@ -228,9 +214,7 @@ let rec type_module_type ctx t tparams p =
 			t_types = [];
 			t_meta = no_meta;
 		} in
-		let e = mk (TTypeExpr (TClassDecl c)) (TType (t_tmp,[])) p in
-		check_locals_masking ctx e;
-		e
+		mk (TTypeExpr (TClassDecl c)) (TType (t_tmp,[])) p
 	| TEnumDecl e ->
 		let types = (match tparams with None -> List.map (fun _ -> mk_mono()) e.e_types | Some l -> l) in
 		let fl = PMap.fold (fun f acc ->
@@ -262,9 +246,7 @@ let rec type_module_type ctx t tparams p =
 			t_types = e.e_types;
 			t_meta = no_meta;
 		} in
-		let e = mk (TTypeExpr (TEnumDecl e)) (TType (t_tmp,types)) p in
-		check_locals_masking ctx e;
-		e
+		mk (TTypeExpr (TEnumDecl e)) (TType (t_tmp,types)) p
 	| TTypeDecl s ->
 		let t = apply_params s.t_types (List.map (fun _ -> mk_mono()) s.t_types) s.t_type in
 		match follow t with
@@ -552,7 +534,6 @@ let type_ident ctx i is_type p mode =
 						Not_found -> loop l
 		in
 		let e = loop ctx.local_types in
-		check_locals_masking ctx e;
 		if mode = MSet then
 			AKNo i
 		else
@@ -1212,6 +1193,20 @@ and type_expr_with_type ctx e t =
 				| _ -> raise Not_found)
 		with Not_found ->
 			type_expr ctx e)
+	| (EArrayDecl el,p) ->
+		(match t with
+		| None -> type_expr ctx e
+		| Some t ->
+			match follow t with
+			| TInst ({ cl_path = [],"Array" },[tp]) ->
+				let el = List.map (fun e ->
+					let e = type_expr_with_type ctx e (Some tp) in
+					unify ctx e.etype tp e.epos;
+					e
+				) el in
+				mk (TArrayDecl el) t p
+			| _ ->
+				type_expr ctx e)
 	| _ ->
 		type_expr ctx e
 
@@ -1679,7 +1674,13 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		mk (TCast (e,None)) (mk_mono()) p
 	| ECast (e, Some t) ->
 		(* force compilation of class "Std" since we might need it *)
-		ignore(Typeload.load_type_def ctx p { tpackage = []; tparams = []; tname = "Std"; tsub = None });
+		(match ctx.com.platform with
+		| Js | Flash8 | Neko | Flash ->
+			let std = Typeload.load_type_def ctx p { tpackage = []; tparams = []; tname = "Std"; tsub = None } in
+			(* ensure typing / mark for DCE *)
+			ignore(follow (try PMap.find "is" (match std with TClassDecl c -> c.cl_statics | _ -> assert false) with Not_found -> assert false).cf_type)
+		| Cpp | Php | Cross ->
+			());
 		let t = Typeload.load_complex_type ctx (pos e) t in
 		let texpr = (match follow t with
 		| TInst (_,params) | TEnum (_,params) ->

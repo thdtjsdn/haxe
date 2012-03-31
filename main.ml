@@ -989,6 +989,7 @@ try
 			Gencpp.generate com;
 		);
 	end;
+	Sys.catch_break false;
 	if not !no_output then List.iter (fun cmd ->
 		let h = Hashtbl.create 0 in
 		Hashtbl.add h "__file__" com.file;
@@ -1000,11 +1001,40 @@ try
 			Sys.chdir (String.sub cmd 3 (len - 3))
 		else begin
 			let binary_string s =
-				if Sys.os_type = "Windows" || Sys.os_type = "Cygwin" then s else String.concat "\n" (ExtString.String.nsplit s "\r\n")
+				if Sys.os_type <> "Win32" && Sys.os_type <> "Cygwin" then s else String.concat "\n" (Str.split (Str.regexp "\r\n") s)
 			in
 			let pout, pin, perr = Unix.open_process_full cmd (Unix.environment()) in
-			let serr = binary_string (IO.read_all (IO.input_channel perr)) in
-			let sout = binary_string (IO.read_all (IO.input_channel pout)) in
+			let iout = Unix.descr_of_in_channel pout in
+			let ierr = Unix.descr_of_in_channel perr in
+			let berr = Buffer.create 0 in
+			let bout = Buffer.create 0 in
+			let tmp = String.create 1024 in
+			(*
+				we need to read available content on process out/err if we want to prevent
+				the process from blocking when the pipe is full
+			*)
+			let is_process_running() =
+				fst (Unix.waitpid [Unix.WNOHANG] (-1)) = 0
+			in
+			let rec loop ins =
+				let (ch,_,_), timeout = (try Unix.select ins [] [] 0.02, true with _ -> ([],[],[]),false) in
+				match ch with
+				| [] ->
+					(* make sure we read all *)
+					if timeout && is_process_running() then
+						loop ins
+					else begin
+						Buffer.add_string berr (IO.read_all (IO.input_channel perr));
+						Buffer.add_string bout (IO.read_all (IO.input_channel pout));
+					end
+				| s :: _ ->
+					let n = Unix.read s tmp 0 (String.length tmp) in
+					Buffer.add_substring (if s == iout then bout else berr) tmp 0 n;
+					loop (if n = 0 then List.filter ((!=) s) ins else ins)
+			in
+			loop [iout;ierr];
+			let serr = binary_string (Buffer.contents berr) in
+			let sout = binary_string (Buffer.contents bout) in
 			if serr <> "" then ctx.messages <- (if serr.[String.length serr - 1] = '\n' then String.sub serr 0 (String.length serr - 1) else serr) :: ctx.messages;
 			if sout <> "" then ctx.com.print sout;
 			match Unix.close_process_full (pout,pin,perr) with
