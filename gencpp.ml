@@ -479,9 +479,10 @@ let is_internal_member member =
    | _ -> false;;
 
 
-let is_dynamic_accessor name acc field class_def =
+let rec is_dynamic_accessor name acc field class_def =
  ( ( acc ^ "_" ^ field.cf_name) = name ) &&
   ( not (List.exists (fun f -> f.cf_name=name) class_def.cl_ordered_fields) )
+   && (match class_def.cl_super with None -> true | Some (parent,_) -> is_dynamic_accessor name acc field parent )
 ;;
 
 
@@ -500,7 +501,7 @@ let gen_interface_arg_type_name name opt typ =
       "hx::Null< " ^ type_str ^ " > "
    else
       type_str )
-      ^ " " ^ (keyword_remap name) ^ (if opt then "=null()" else "")
+   ^ " " ^ (keyword_remap name)
 ;;
 
 (* Generate prototype text, including allowing default values to be null *)
@@ -1833,9 +1834,11 @@ let gen_field ctx class_def class_name ptr_name is_static is_interface field =
 
 			output "\n\n";
 			(* generate dynamic version too ... *)
-			if (is_static) then output "STATIC_";
-			output ("HX_DEFINE_DYNAMIC_FUNC" ^ nargs ^ "(" ^ class_name ^ "," ^
+         if ( not (is_override class_def field.cf_name ) ) then begin
+				if (is_static) then output "STATIC_";
+				output ("HX_DEFINE_DYNAMIC_FUNC" ^ nargs ^ "(" ^ class_name ^ "," ^
 							 remap_name ^ "," ^ ret ^ ")\n\n");
+			end;
 
 		end else begin
 			ctx.ctx_real_this_ptr <- false;
@@ -1943,9 +1946,11 @@ let gen_member_def ctx class_def is_static is_interface field =
 			output (" " ^ remap_name ^ "( " );
 			output (gen_arg_list function_def.tf_args "" );
 			output ");\n";
-			output (if is_static then "		static " else "		");
-			output ("Dynamic " ^ remap_name ^ "_dyn();\n" )
+         if ( not (is_override class_def field.cf_name ) ) then begin
+				output (if is_static then "		static " else "		");
+				output ("Dynamic " ^ remap_name ^ "_dyn();\n" )
 			end;
+		end;
 		output "\n";
 	| _ ->
 		(* Variable access *)

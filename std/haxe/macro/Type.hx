@@ -70,8 +70,18 @@ typedef ClassField = {
 	var doc : Null<String>;
 }
 
+enum ClassKind {
+	KNormal;
+	KTypeParameter;
+	KExtension(cl:Ref<ClassType>, params:Array<Type>);
+	KExpr(expr:Expr);
+	KGeneric;
+	KGenericInstance(cl:Ref<ClassType>, params:Array<Type>);
+	KMacroType;
+}
+
 typedef ClassType = {> BaseType,
-	//var kind : ClassKind;
+	var kind : ClassKind;
 	var isInterface : Bool;
 	var superClass : Null<{ t : Ref<ClassType>, params : Array<Type> }>;
 	var interfaces : Array<{ t : Ref<ClassType>, params : Array<Type> }>;
