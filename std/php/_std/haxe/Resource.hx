@@ -40,18 +40,18 @@ class Resource {
 	}
 
 	public static function listNames() : Array<String> {
-		var a = php.FileSystem.readDirectory(getDir());
+		var a = sys.FileSystem.readDirectory(getDir());
 		if(a[0] == '.') a.shift();
 		if(a[0] == '..') a.shift();
 		return a;
 	}
 
 	public static function getString( name : String ) : String {
-		return php.io.File.getContent(getPath(name));
+		return sys.io.File.getContent(getPath(name));
 	}
 
 	public static function getBytes( name : String ) : haxe.io.Bytes {
-		return php.io.File.getBytes(getPath(name));
+		return sys.io.File.getBytes(getPath(name));
 	}
 
 }

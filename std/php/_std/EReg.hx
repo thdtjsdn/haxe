@@ -32,7 +32,7 @@
 	var options : String;
 	var re : String;
 	var matches : ArrayAccess<Dynamic>;
-
+	
 	public function new( r : String, opt : String ) : Void {
 		this.pattern = r;
 		var a = opt.split("g");
@@ -40,7 +40,7 @@
 		if( global )
 			opt = a.join("");
 		this.options = opt;
-		this.re = "/" + untyped __call__("str_replace", "/", "\\/", r) + "/" + opt;
+		this.re = untyped __php__("'\"' . str_replace('\"','\\\\\"',$r) . '\"' . $opt");
 	}
 
 	public function match( s : String ) : Bool {

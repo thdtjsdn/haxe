@@ -20,8 +20,7 @@
 	all : allowed abitrary string fields in anonymous objects
 	all : allowed optional structure fields (for constant structs)
 	all : allowed optional args in functions types (?Int -> Void)
-	all : added Reflect.getProperty/setProperty
-		(partial support : neko, js only so far)
+	all : added Reflect.getProperty/setProperty (except flash8)
 	all : added --wait and --cwd and --connect (parsed files and module caching)
 	all : fixed completion in macros calls arguments
 	all : fixed DCE removing empty but still used interfaces/superclasses
@@ -31,8 +30,18 @@
 	js : make difference between values and statements expressions in JSGenApi
 	js : added source mapping with -debug (replace previous stack emulation)
 	flash : added @:file("a.dat") class File extends flash.utils.ByteArray
+	flash : added @:sound("file.wav|mp3") class S extends flash.media.Sound
 	js : added --js-modern for wrapping output in a closure and ES5 strict mode
 	all : null, true and false are now keywords
+	all : neko.io.Path, cpp.io.Path and php.io.Path are now haxe.io.Path
+	neko, cpp, php : added Sys class, sys.io and sys.net packages and "sys" define
+	all : allow to access root package with std prefix (std.Type for example)
+	all : added haxe.EnumFlags
+	sys : io.File.getChar/stdin/stdout/stderr are now in Sys class
+   cpp : Reflect.getField and Reflect.setField no longer call property functions.  Use Reflect.getProperty and Refelect.setProperty instead.
+   cpp : Default arguments now use Null<T> for performance increase and interface compatibility
+   cpp : Added metadata options for injecting native cpp code into headers, classes and functions
+
 
 2011-09-25: 2.08
 	js : added js.JQuery

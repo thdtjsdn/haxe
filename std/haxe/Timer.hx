@@ -83,10 +83,8 @@ class Timer {
 	public static function stamp() : Float {
 		#if flash
 			return flash.Lib.getTimer() / 1000;
-		#elseif neko
-			return neko.Sys.time();
-		#elseif php
-			return php.Sys.time();
+		#elseif (neko || php)
+			return Sys.time();
 		#elseif js
 			return Date.now().getTime() / 1000;
 		#elseif cpp

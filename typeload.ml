@@ -76,7 +76,15 @@ let rec load_type_def ctx p t =
 	with
 		Not_found ->
 			let next() =
-				let m = ctx.g.do_load_module ctx (t.tpackage,t.tname) p in
+				let t, m = (try
+					t, ctx.g.do_load_module ctx (t.tpackage,t.tname) p
+				with Error (Module_not_found _,p2) as e when p == p2 -> 
+					match t.tpackage with
+					| "std" :: l ->
+						let t = { t with tpackage = l } in
+						t, ctx.g.do_load_module ctx (t.tpackage,t.tname) p
+					| _ -> raise e
+				) in
 				let tpath = (t.tpackage,tname) in
 				try
 					List.find (fun t -> not (t_infos t).mt_private && t_path t = tpath) m.m_types
@@ -662,7 +670,7 @@ let init_core_api ctx c =
 			) fcore;
 			PMap.iter (fun i f ->
 				let p = (match f.cf_expr with None -> c.cl_pos | Some e -> e.epos) in
-				if f.cf_public && not (PMap.mem f.cf_name fcore) then error ("Public field " ^ i ^ " is not part of core type") p;
+				if f.cf_public && not (PMap.mem f.cf_name fcore) && not (List.mem f.cf_name c.cl_overrides) then error ("Public field " ^ i ^ " is not part of core type") p;
 			) fl;
 		in
 		check_fields ccore.cl_fields c.cl_fields;
@@ -907,10 +915,32 @@ let init_class ctx c p herits fields =
 		| FFun fd ->
 			let params = ref [] in
 			params := List.map (fun (n,flags) ->
-				match flags with
-				| [] ->
-					type_type_params ctx ([],name) (fun() -> !params) p (n,[])
-				| _ -> error "This notation is not allowed because it can't be checked" p
+				(match flags with
+				| [] -> ()
+				| _ ->
+					(** look if the type is contained into arguments **)
+					let rec lookup_type t =
+						match t with
+						| CTPath { tpackage = []; tname = n2 } when n = n2 -> true
+						| CTPath p -> List.exists lookup_tparam p.tparams
+						| CTFunction (cl,r) -> List.exists lookup_type (r::cl)
+						| CTExtend (_,fl) | CTAnonymous fl -> List.exists lookup_cfield fl
+						| CTOptional t | CTParent t -> lookup_type t						
+					and lookup_cfield f =
+						match f.cff_kind with
+						| FVar (None,_) -> false
+						| FProp (_,_,t,_) | FVar (Some t,_) -> lookup_type t
+						| FFun f -> lookup_fun f
+					and lookup_fun f =
+						List.exists (fun (_,_,t,_) -> match t with None -> false | Some t -> lookup_type t) f.f_args || 
+						List.exists (fun (_,tl) -> List.exists lookup_type tl) f.f_params ||
+						(match f.f_type with None -> false | Some t -> lookup_type t)
+					and lookup_tparam = function
+						| TPType t -> lookup_type t
+						| TPExpr _ -> false
+					in
+					if lookup_fun { fd with f_type = None; f_params = [] } && not (has_meta ":allowConstraint" f.cff_meta) then error "This notation is not allowed because it can't be checked" p);
+				type_type_params ctx ([],name) (fun() -> !params) p (n,flags)
 			) fd.f_params;
 			let params = !params in
 			if inline && c.cl_interface then error "You can't declare inline methods in interfaces" p;
@@ -937,8 +967,8 @@ let init_class ctx c p herits fields =
 			else
 				let tdyn = Some (CTPath { tpackage = []; tname = "Dynamic"; tparams = []; tsub = None }) in
 				let to_dyn = function
-					| { tpackage = ["haxe";"macro"]; tname = "Expr"; tsub = Some "ExprRequire"; tparams = [TPType t] } -> Some t
-					| { tpackage = []; tname = "ExprRequire"; tsub = None; tparams = [TPType t] } -> Some t
+					| { tpackage = ["haxe";"macro"]; tname = "Expr"; tsub = Some ("ExprRequire"|"ExprOf"); tparams = [TPType t] } -> Some t
+					| { tpackage = []; tname = ("ExprRequire"|"ExprOf"); tsub = None; tparams = [TPType t] } -> Some t
 					| _ -> tdyn
 				in
 				{

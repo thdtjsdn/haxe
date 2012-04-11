@@ -22,53 +22,14 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
  * DAMAGE.
  */
-package neko.net;
-import neko.net.Socket;
-import haxe.io.Error;
+package sys.io;
 
-class SocketInput extends haxe.io.Input {
+/**
+	Use [sys.io.File.write] to create a [FileOutput]
+**/
+extern class FileOutput extends haxe.io.Output {
 
-	var __s : SocketHandle;
-
-	public function new(s) {
-		__s = s;
-	}
-
-	public override function readByte() : Int {
-		return try {
-			socket_recv_char(__s);
-		} catch( e : Dynamic ) {
-			if( e == "Blocking" )
-				throw Blocked;
-			else if( __s == null )
-				throw Custom(e);
-			else
-				throw new haxe.io.Eof();
-		}
-	}
-
-	public override function readBytes( buf : haxe.io.Bytes, pos : Int, len : Int ) : Int {
-		var r;
-		try {
-			r = socket_recv(__s,buf.getData(),pos,len);
-		} catch( e : Dynamic ) {
-			if( e == "Blocking" )
-				throw Blocked;
-			else
-				throw Custom(e);
-		}
-		if( r == 0 )
-			throw new haxe.io.Eof();
-		return r;
-	}
-
-	public override function close() {
-		super.close();
-		if( __s != null ) socket_close(__s);
-	}
-
-	private static var socket_recv = neko.Lib.load("std","socket_recv",4);
-	private static var socket_recv_char = neko.Lib.load("std","socket_recv_char",1);
-	private static var socket_close = neko.Lib.load("std","socket_close",1);
+	public function seek( p : Int, pos : FileSeek ) : Void;
+	public function tell() : Int;
 
 }

@@ -136,7 +136,7 @@ and type_string haxe_type =
 	type_string_suff "" haxe_type;;
 
 let debug_expression expression type_too =
-	"/* " ^ Type.s_expr_kind expression ^ (if (type_too) then " = " ^ (type_string expression.etype) else "") ^ " */";;
+	"/* " ^ Type.s_expr_kind expression ^ (if (type_too) then " = " ^ (type_string (follow expression.etype)) else "") ^ " */";;
 
 let rec register_extern_required_path ctx path =
 	if (List.exists(fun p -> p = path) ctx.extern_classes_with_init) && not (List.exists(fun p -> p = path) ctx.extern_required_paths) then
@@ -145,7 +145,7 @@ let rec register_extern_required_path ctx path =
 let s_expr_expr = Type.s_expr_kind
 
 let s_expr_name e =
-	s_type (print_context()) e.etype
+	s_type (print_context()) (follow e.etype)
 
 let s_type_name t =
 	s_type (print_context()) t
@@ -739,6 +739,12 @@ and gen_field_access ctx isvar e s =
 		gen_value ctx e;
 		spr ctx ")";
 		gen_member_access ctx isvar e s
+	| TCast (ec, _) when (match ec.eexpr with | TNew _ | TArrayDecl _ -> true | _ -> false) ->
+		spr ctx "_hx_deref(";
+		ctx.is_call <- false;
+		gen_value ctx e;
+		spr ctx ")";
+		gen_member_access ctx isvar e s
 	| _ ->
 		gen_expr ctx e;
 		gen_member_access ctx isvar e s
@@ -888,7 +894,15 @@ and gen_expr ctx e =
 	| TArray (e1,e2) ->
 		(match e1.eexpr with
 		| TCall _
+		| TBlock _
+		| TParenthesis _
 		| TArrayDecl _ ->
+			spr ctx "_hx_array_get(";
+			gen_value ctx e1;
+			spr ctx ", ";
+			gen_value ctx e2;
+			spr ctx ")";
+		| TCast (ec, _) when (match ec.eexpr with | TArrayDecl _  | TBlock _ -> true | _ -> false) ->
 			spr ctx "_hx_array_get(";
 			gen_value ctx e1;
 			spr ctx ", ";
@@ -1018,7 +1032,6 @@ and gen_expr ctx e =
 				| _ ->
 					gen_field_op ctx e1;
 				);
-
 				spr ctx s_phop;
 
 				(match e2.eexpr with
@@ -1037,7 +1050,7 @@ and gen_expr ctx e =
 				gen_field_op ctx e2;
 			end else if
 				   ((se1 = "Int" || se1 = "Float" || se1 = "Null<Int>" || se1 = "Null<Float>")
-				   && (se1 = "Int" || se1 = "Float" || se1 = "Null<Int>" || se1 = "Null<Float>"))
+				&& (se1 = "Int" || se1 = "Float" || se1 = "Null<Int>" || se1 = "Null<Float>"))
 				|| (is_unknown_expr e1 && is_unknown_expr e2)
 				|| is_anonym_expr e1
 				|| is_anonym_expr e2
@@ -1049,15 +1062,19 @@ and gen_expr ctx e =
 				gen_field_op ctx e2;
 				spr ctx ")";
 			end else if
-				   se1 == se2
-				|| (match e1.eexpr with | TConst _ | TLocal _ | TArray _  | TNew _ -> true | _ -> false)
-				|| (match e2.eexpr with | TConst _ | TLocal _ | TArray _  | TNew _ -> true | _ -> false)
-				|| is_string_expr e1
-				|| is_string_expr e2
-				|| is_anonym_expr e1
-				|| is_anonym_expr e2
-				|| is_unknown_expr e1
-				|| is_unknown_expr e2
+				(  
+					   se1 == se2
+					|| (match e1.eexpr with | TConst _ | TLocal _ | TArray _  | TNew _ -> true | _ -> false)
+					|| (match e2.eexpr with | TConst _ | TLocal _ | TArray _  | TNew _ -> true | _ -> false)
+					|| is_string_expr e1
+					|| is_string_expr e2
+					|| is_anonym_expr e1
+					|| is_anonym_expr e2 
+					|| is_unknown_expr e1
+					|| is_unknown_expr e2
+				)
+				&& (type_string (follow e1.etype)) <> "Dynamic"
+				&& (type_string (follow e2.etype)) <> "Dynamic"
 			then begin
 				gen_field_op ctx e1;
 				spr ctx s_phop;
@@ -1710,11 +1727,21 @@ and gen_value ctx e =
 	| TTry _ ->
 		inline_block ctx e
 
+let rec is_instance_method_defined cls m =
+	if PMap.exists m cls.cl_fields then
+		true
+	else
+		match cls.cl_super with
+		| Some (scls, _) ->
+			is_instance_method_defined scls m
+		| None ->
+			false
+		
 let is_method_defined ctx m static =
 	if static then
 		PMap.exists m ctx.curclass.cl_statics
 	else
-		PMap.exists m ctx.curclass.cl_fields
+		is_instance_method_defined ctx.curclass m
 
 let generate_self_method ctx rights m static setter =
 	if setter then (
@@ -1750,8 +1777,8 @@ let generate_field ctx static f =
 			gen_function ctx (s_ident f.cf_name) fd f.cf_params p
 	| _ ->
 		if ctx.curclass.cl_interface then
-			match follow f.cf_type with
-			| TFun (args,r) ->
+			match follow f.cf_type, f.cf_kind with
+			| TFun (args,r), Method _ ->
 				print ctx "function %s(" (s_ident f.cf_name);
 				concat ctx ", " (fun (arg,o,t) ->
 					s_funarg ctx arg t p o;
@@ -1964,7 +1991,29 @@ let generate_class ctx c =
 	);
 
 	List.iter (generate_field ctx true) c.cl_ordered_statics;
+	
+	let gen_props props = 
+		String.concat "," (List.map (fun (p,v) -> "\"" ^ p ^ "\" => \"" ^ v ^ "\"") props)
+	in
 
+	let rec fields c =
+		let list = Codegen.get_properties (c.cl_ordered_statics @ c.cl_ordered_fields) in
+		match c.cl_super with
+		| Some (csup, _) ->
+			list @ fields csup
+		| None ->
+			list
+	in
+	
+	(match fields c with
+	| [] ->
+		()
+	| props ->
+		newline ctx;
+		print ctx "static $__properties__ = array(%s)" (gen_props props);
+	);
+		
+		
 	cl();
 	newline ctx;
 

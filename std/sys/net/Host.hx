@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, The haXe Project Contributors
+ * Copyright (c) 2005-2012, The haXe Project Contributors
  * All rights reserved.
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -21,7 +21,39 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
  * DAMAGE.
+ *
  */
-package php.net;
+package sys.net;
 
-typedef SocketOutput = php.io.FileOutput;
+/**
+	A given IP host name.
+**/
+extern class Host {
+
+	/**
+		The actual IP corresponding to the host.
+	**/
+	var ip(default,null) : haxe.Int32;
+
+	/**
+		Creates a new Host : the name can be an IP in the form "127.0.0.1" or an host name such as "google.com", in which case
+		the corresponding IP address is resolved using DNS. An exception occur if the host name could not be found.
+	**/
+	function new( name : String ) : Void;
+
+	/**
+		Returns the IP representation of the host
+	**/
+	function toString() : String;
+
+	/**
+		Perform a reverse-DNS query to resolve a host name from an IP.
+	**/
+	function reverse() : String;
+
+	/**
+		Returns the local computer host name
+	**/
+	static function localhost() : String;
+
+}

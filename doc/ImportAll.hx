@@ -55,14 +55,14 @@ class ImportAll {
 			if( p == "/" )
 				continue;
 			// skip if we have a classpath to haxe
-			if( pack.length == 0 && neko.FileSystem.exists(p+"std") )
+			if( pack.length == 0 && sys.FileSystem.exists(p+"std") )
 				continue;
 			var p = p + pack.split(".").join("/");
 			if( StringTools.endsWith(p,"/") )
 				p = p.substr(0,-1);
-			if( !neko.FileSystem.exists(p) || !neko.FileSystem.isDirectory(p) )
+			if( !sys.FileSystem.exists(p) || !sys.FileSystem.isDirectory(p) )
 				continue;
-			for( file in neko.FileSystem.readDirectory(p) ) {
+			for( file in sys.FileSystem.readDirectory(p) ) {
 				if( file == ".svn" || file == "_std" )
 					continue;
 				var full = (pack == "") ? file : pack + "." + file;
@@ -73,13 +73,14 @@ class ImportAll {
 					switch( cl ) {
 					case "ImportAll", "neko.db.MacroManager": continue;
 					case "haxe.TimerQueue": if( Context.defined("neko") || Context.defined("php") || Context.defined("cpp") ) continue;
+					case "Sys": if( !(Context.defined("neko") || Context.defined("php") || Context.defined("cpp")) ) continue;
 					case "haxe.web.Request": if( !(Context.defined("neko") || Context.defined("php") || Context.defined("js")) ) continue;
 					case "haxe.macro.ExampleJSGenerator","haxe.macro.Context", "haxe.macro.Compiler": if( !Context.defined("neko") ) continue;
 					case "haxe.remoting.SocketWrapper": if( !Context.defined("flash") ) continue;
 					case "haxe.remoting.SyncSocketConnection": if( !(Context.defined("neko") || Context.defined("php") || Context.defined("cpp")) ) continue;
 					}
 					Context.getModule(cl);
-				} else if( neko.FileSystem.isDirectory(p + "/" + file) )
+				} else if( sys.FileSystem.isDirectory(p + "/" + file) )
 					run(full);
 			}
 		}

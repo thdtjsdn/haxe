@@ -22,6 +22,15 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
  * DAMAGE.
  */
-package php.net;
+package sys.io;
 
-typedef SocketInput = php.io.FileInput;
+/**
+	Use [sys.io.File.read] to create a [FileInput]
+**/
+extern class FileInput extends haxe.io.Input {
+
+	function seek( p : Int, pos : FileSeek ) : Void;
+	function tell() : Int;
+	function eof() : Bool;
+
+}
