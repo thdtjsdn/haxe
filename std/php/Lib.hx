@@ -57,7 +57,7 @@ class Lib {
 
 	public static function hashOfAssociativeArray<T>(arr : NativeArray) : Hash<T> {
 		var h = new Hash<T>();
-		untyped __php__("reset($arr); while(list($k, $v) = each($arr)) $h->set($k, $v)");
+		untyped h.h = arr;
 		return h;
 	}
 
@@ -74,6 +74,25 @@ class Lib {
 
 	public static function associativeArrayOfObject(ob : Dynamic) : NativeArray {
 		return untyped __php__("(array) $ob");
+	}
+	
+	/**
+	 * See the documentation for the equivalent PHP function for details on usage: 
+	 * http://php.net/manual/en/function.mail.php
+	 * @param	to
+	 * @param	subject
+	 * @param	message
+	 * @param	?additionalHeaders
+	 * @param	?additionalParameters
+	 */
+	public static function mail(to : String, subject : String, message : String, ?additionalHeaders : String, ?additionalParameters : String) : Bool
+	{
+		if(null != additionalParameters)
+			return untyped __call__("mail", to, subject, message, additionalHeaders, additionalParameters);
+		else if(null != additionalHeaders)
+			return untyped __call__("mail", to, subject, message, additionalHeaders);
+		else
+			return untyped __call__("mail", to, subject, message);
 	}
 
 	/**
