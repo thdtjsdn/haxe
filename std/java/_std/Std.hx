@@ -22,8 +22,8 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
  * DAMAGE.
  */
-import jvm.Boot;
-import jvm.Lib;
+import java.Boot;
+import java.Lib;
 import haxe.lang.Exceptions;
  
 @:core_api @:nativegen class Std {
@@ -44,7 +44,7 @@ import haxe.lang.Exceptions;
 			return untyped __java__('v instanceof java.lang.Boolean');
 		}
 			
-		var native:jvm.native.lang.Class<Dynamic> = untyped clt.nativeType();
+		var native:java.lang.Class<Dynamic> = untyped clt.nativeType();
 		
 		return native.isAssignableFrom(Lib.getNativeType(v));
 	}

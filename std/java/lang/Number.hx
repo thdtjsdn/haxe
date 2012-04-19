@@ -1,6 +1,6 @@
-package jvm.native.lang;
+package java.lang;
 import haxe.Int64;
-import jvm.StdTypes;
+import java.StdTypes;
 
 private typedef StdFloat = Float;
 

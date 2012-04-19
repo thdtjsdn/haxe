@@ -26,7 +26,7 @@
 /**
 	This class defines mathematical functions and constants.
 **/
-@:native("jvm.native.lang.Math") extern class Math
+@:native("java.lang.Math") extern class Math
 {
 	static var PI(default,null) : Float;
 	static var NaN(default,null) : Float;

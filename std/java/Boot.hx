@@ -1,19 +1,19 @@
-package jvm;
+package java;
 import haxe.lang.Exceptions;
 import haxe.lang.Function;
 import haxe.lang.HxObject;
 import haxe.lang.Runtime;
 import haxe.lang.Iterator;
-import jvm.Lib;
+import java.Lib;
 //import haxe.lang.StringExt;
-import jvm.StdTypes;
+import java.StdTypes;
 import Hash;
 import Reflect;
-import jvm.native.lang.Boolean;
-import jvm.native.lang.Character;
-import jvm.native.lang.Class;
-import jvm.native.lang.Number;
-import jvm.native.lang.Throwable;
+import java.lang.Boolean;
+import java.lang.Character;
+import java.lang.Class;
+import java.lang.Number;
+import java.lang.Throwable;
 import haxe.lang.StringExt;
 import haxe.lang.FieldLookup;
 /**

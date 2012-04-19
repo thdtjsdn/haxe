@@ -1,4 +1,4 @@
-import jvm.native.util.regex.Regex;
+import java.util.regex.Regex;
 /*
  * Copyright (c) 2005, The haXe Project Contributors
  * All rights reserved.

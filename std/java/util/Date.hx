@@ -1,4 +1,4 @@
-package jvm.native.util;
+package java.util;
 import haxe.Int64;
 /*
  * Copyright (c) 2005, The haXe Project Contributors

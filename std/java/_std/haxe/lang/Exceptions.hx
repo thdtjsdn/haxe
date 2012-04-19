@@ -1,5 +1,5 @@
 package haxe.lang;
-import jvm.native.lang.Throwable;
+import java.lang.Throwable;
 
 /**
  * ...

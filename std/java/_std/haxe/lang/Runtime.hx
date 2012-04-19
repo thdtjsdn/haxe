@@ -450,7 +450,7 @@ package haxe.lang;
 		classes.set(name, cl);
 	}
 	
-	public static function getClass(name:String, t:jvm.native.lang.Class<Dynamic>):Class<Dynamic>
+	public static function getClass(name:String, t:java.lang.Class<Dynamic>):Class<Dynamic>
 	{
 		var ret:Class<Dynamic> = classes.get(name);
 		if (ret == null)
@@ -465,7 +465,7 @@ package haxe.lang;
 	
 	return null;
 	')
-	public static function slowGetClass(name:String, t:jvm.native.lang.Class<Dynamic>):Class<Dynamic>
+	public static function slowGetClass(name:String, t:java.lang.Class<Dynamic>):Class<Dynamic>
 	{
 		return null;
 	}

@@ -1,5 +1,5 @@
-package jvm;
-import jvm.native.lang.Class;
+package java;
+import java.lang.Class;
 
 /**
  * ...
@@ -20,7 +20,7 @@ class Lib
 		}
 	}
 	
-	public static function toNativeType<T>(cl:Class<T>):jvm.native.lang.Class<T>
+	public static function toNativeType<T>(cl:Class<T>):java.lang.Class<T>
 	{
 		return untyped cl.nativeType();
 	}
@@ -28,7 +28,7 @@ class Lib
 	@:functionBody('
 		return (java.lang.Class<T>) obj.getClass();
 	')
-	public static function getNativeType<T>(obj:T):jvm.native.lang.Class<T>
+	public static function getNativeType<T>(obj:T):java.lang.Class<T>
 	{
 		return null;
 	}

@@ -1,5 +1,5 @@
-package jvm.native.lang;
-import jvm.StdTypes;
+package java.lang;
+import java.StdTypes;
 
 /**
  * ...

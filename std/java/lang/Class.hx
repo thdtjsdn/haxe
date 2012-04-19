@@ -1,4 +1,4 @@
-package jvm.native.lang;
+package java.lang;
 
 /**
  * ...

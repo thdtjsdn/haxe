@@ -71,7 +71,7 @@ enum ValueType {
 	}
 	
 	public static function getClassName( c : Class<Dynamic> ) : String untyped {
-		var name:String = cast(c.nativeType(), jvm.native.lang.Class<Dynamic>).getName();
+		var name:String = cast(c.nativeType(), java.lang.Class<Dynamic>).getName();
 		if (name.startsWith("haxe.root."))
 			return name.substr(10);
 			
@@ -86,7 +86,7 @@ enum ValueType {
 	}
 
 	public static function getEnumName( e : Enum<Dynamic> ) : String untyped {
-		return cast(e.nativeType(), jvm.native.lang.Class<Dynamic>).getName();
+		return cast(e.nativeType(), java.lang.Class<Dynamic>).getName();
 	}
 
 	public static function resolveClass( name : String ) : Class<Dynamic> untyped 

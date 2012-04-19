@@ -1,5 +1,5 @@
-package jvm.native.lang;
-import jvm.NativeArray;
+package java.lang;
+import java.NativeArray;
 
 /**
  * ...

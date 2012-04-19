@@ -8,14 +8,14 @@ import haxe.Int64;
 
 class Date 
 {
-	private var date:jvm.native.util.Date;
+	private var date:java.util.Date;
 	
 	/**
 		Creates a new date object.
 	**/
 	public function new(year : Int, month : Int, day : Int, hour : Int, min : Int, sec : Int ) : Void
 	{
-		date = new jvm.native.util.Date(year, month, day, hour, min, sec);
+		date = new java.util.Date(year, month, day, hour, min, sec);
 	}
 
 	/**
@@ -110,7 +110,7 @@ class Date
 	static public function now() : Date
 	{
 		var d = new Date(0, 0, 0, 0, 0, 0);
-		d.date = new jvm.native.util.Date();
+		d.date = new java.util.Date();
 		return d;
 	}
 
@@ -121,7 +121,7 @@ class Date
 	static public function fromTime( t : Float ) : Date
 	{
 		var d = new Date(0, 0, 0, 0, 0, 0);
-		d.date = new jvm.native.util.Date(cast(t, Int64));
+		d.date = new java.util.Date(cast(t, Int64));
 		return d;
 	}
 
