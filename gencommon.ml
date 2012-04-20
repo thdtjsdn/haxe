@@ -1083,7 +1083,14 @@ let field_access gen (t:t) (field:string) : (tfield_access) =
                 let cf = PMap.find field cl.cl_fields in
                 (* found *)
                 (* get actual type *)
-                let actual_t = List.fold_left (fun t (cl,params) -> apply_params cl.cl_types (gen.greal_type_param (TClassDecl cl) params) t) cf.cf_type acc in
+                let get_real_t = match cf.cf_kind with
+                  | Var _ -> (fun t -> gen.greal_type t)
+                  | _ -> (fun t -> 
+                    let args, ret = get_fun t in
+                    TFun(List.map (fun (n,o,t) -> (n,o,gen.greal_type t)) args, gen.greal_type ret)
+                  )
+                in
+                let actual_t = List.fold_left (fun t (cl,params) -> apply_params cl.cl_types (gen.greal_type_param (TClassDecl cl) params) (get_real_t t)) cf.cf_type acc in
                 Hashtbl.add gen.greal_field_types (orig_cl.cl_path, hashtbl_field) (Some (cf, actual_t));
                 FClassField(orig_cl, orig_params, cf, false, actual_t)
               with | Not_found ->
@@ -8455,6 +8462,63 @@ struct
     let map md = Some(run md) in
     gen.gmodule_filters#add ~name:name ~priority:(PCustom priority) map
   
+  
+end;;
+
+(* ******************************************* *)
+(* Int Division Synf *)
+(* ******************************************* *)
+
+(*
+  
+  On targets that support int division, this module will force a float division to be performed,
+  so compatibility with current haxe targets is ensured.
+  If catch_int_div is set to true, though, it will look for casts to int or use of Std.int() to optimize
+  this kind of operation.
+  
+  dependencies:
+    since it depends on nothing, but many modules might generate division expressions, 
+    it will be one of the last modules to run
+  
+*)
+
+module IntDivisionSynf =
+struct
+
+  let name = "int_division_synf"
+  
+  let priority = solve_deps name [ DAfter ExpressionUnwrap.priority; DAfter ObjectDeclMap.priority; DAfter ArrayDeclSynf.priority ]
+  
+  let is_int t = match follow t with 
+    | TInst( { cl_path = ([], "Int") }, [] ) -> true
+    | _ -> false
+  
+  let default_implementation gen catch_int_div =
+    let basic = gen.gcon.basic in
+    let rec run e =
+      match e.eexpr with 
+        | TBinop((Ast.OpDiv as op), e1, e2)
+        | TBinop(((Ast.OpAssignOp (Ast.OpDiv)) as op), e1, e2) when is_int e1.etype && is_int e2.etype ->
+          { e with eexpr = TBinop(op, mk_cast basic.tfloat (run e1), run e2) }
+        | TCall(
+            { eexpr = TField( { eexpr = TTypeExpr ( TClassDecl ({ cl_path = ([], "Std") }) ) }, "int") },
+            [ ({ eexpr = TBinop((Ast.OpDiv as op), e1, e2) } as ebinop ) ]
+          )
+        | TCall(
+            { eexpr = TField( { eexpr = TTypeExpr ( TClassDecl ({ cl_path = ([], "Std") }) ) }, "int") },
+            [ ({ eexpr = TBinop(((Ast.OpAssignOp (Ast.OpDiv)) as op), e1, e2) } as ebinop ) ]
+          ) when catch_int_div && is_int e1.etype && is_int e2.etype ->
+          { ebinop with eexpr = TBinop(op, run e1, run e2); etype = basic.tint }
+        | TCast( ({ eexpr = TBinop((Ast.OpDiv as op), e1, e2) } as ebinop ), _ )
+        | TCast( ({ eexpr = TBinop(( (Ast.OpAssignOp Ast.OpDiv) as op), e1, e2) } as ebinop ), _ ) when catch_int_div && is_int e1.etype && is_int e2.etype && is_int e.etype ->
+          { ebinop with eexpr = TBinop(op, run e1, run e2); etype = basic.tint }
+        | _ -> Type.map_expr run e
+    in
+    run
+  
+  let configure gen (mapping_func:texpr->texpr) =
+    let map e = Some(mapping_func e) in
+    gen.gsyntax_filters#add ~name:name ~priority:(PCustom priority) map
   
 end;;
 
