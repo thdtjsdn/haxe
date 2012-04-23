@@ -135,6 +135,39 @@ package haxe.lang;
 	}
 	
 	@:functionBody('
+		java.lang.Class cl = null;
+		if (o instanceof java.lang.Class)
+		{
+			cl = (java.lang.Class) o;
+		} else {
+			cl = o.getClass();
+		}
+		
+		try
+		{
+			java.lang.reflect.Field f = cl.getField(field);
+			return true;
+		}
+		catch(Throwable t)
+		{
+			java.lang.reflect.Method[] ms = cl.getMethods();
+			for (int i = 0; i < ms.length; i++)
+			{
+				if (ms[i].getName().equals(field))
+				{
+					return true;
+				}
+			}
+		}
+
+		return false;
+	')
+	public static function slowHasField(o:Dynamic, field:String):Bool
+	{
+		return false;
+	}
+	
+	@:functionBody('
 			if (v1 == v2)
 				return 0;
 			
@@ -193,9 +226,9 @@ package haxe.lang;
 		else
 			return null;
 	
+	java.lang.Class cl = null;
 	try
 	{
-		java.lang.Class cl = null;
 		if (obj instanceof java.lang.Class)
 		{
 			cl = (java.lang.Class) obj;
@@ -205,9 +238,25 @@ package haxe.lang;
 		}
 		
 		java.lang.reflect.Field f = cl.getField(field);
+		f.setAccessible(true);
 		return f.get(obj);
 	} catch (Throwable t)
 	{
+		try
+		{
+			java.lang.reflect.Method[] ms = cl.getMethods();
+			for (int i = 0; i < ms.length; i++)
+			{
+				if (ms[i].getName().equals(field))
+				{
+					return new haxe.lang.NativeMethodFunction(obj, field);
+				}
+			}
+		} catch (Throwable t2)
+		{
+			
+		}
+		
 		if (throwErrors)
 			throw HaxeException.wrap(t);
 		
@@ -232,6 +281,9 @@ package haxe.lang;
 		
 		try {
 			java.lang.reflect.Field f = cl.getField(field);
+			f.setAccessible(true);
+			
+			//FIXME we must evaluate if field to be set receives either int or double
 			if (isInt(value))
 			{
 				f.setInt(obj, toInt(value));
@@ -249,8 +301,7 @@ package haxe.lang;
 	')
 	public static function slowSetField(obj:Dynamic, field:String, value:Dynamic):Dynamic
 	{
-		//not implemented yet;
-		throw "Not implemented";
+		return null;
 	}
 	
 	@:functionBody('
@@ -367,6 +418,7 @@ package haxe.lang;
 				}
 			}
 			
+			found.setAccessible(true);
 			return found.invoke(obj, objs);
 		} catch(Throwable t) {
 			throw HaxeException.wrap(t);
@@ -374,7 +426,7 @@ package haxe.lang;
 	')
 	public static function slowCallField(obj:Dynamic, field:String, args:Array<Dynamic>):Dynamic
 	{
-		throw "not implemented";
+		return null;
 	}
 	
 	@:functionBody('
