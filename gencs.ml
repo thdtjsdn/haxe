@@ -159,23 +159,23 @@ struct
         (* end Std.int() *)
         
         | TField(ef, "length") when is_string ef.etype ->
-          { e with eexpr = TField(ef, "Length") }
+          { e with eexpr = TField(run ef, "Length") }
         | TField(ef, ("toLowerCase")) when is_string ef.etype ->
-          { e with eexpr = TField(ef, "ToLower") }
+          { e with eexpr = TField(run ef, "ToLower") }
         | TField(ef, ("toUpperCase")) when is_string ef.etype ->
-          { e with eexpr = TField(ef, "ToUpper") }
+          { e with eexpr = TField(run ef, "ToUpper") }
         
         | TCall( ( { eexpr = TField({ eexpr = TTypeExpr (TClassDecl cl) }, "fromCharCode") } ), [cc] ) ->
-          { e with eexpr = TNew(get_cl_from_t basic.tstring, [], [mk_cast tchar cc; mk_int gen 1 cc.epos]) }
+          { e with eexpr = TNew(get_cl_from_t basic.tstring, [], [mk_cast tchar (run cc); mk_int gen 1 cc.epos]) }
         | TCall( ( { eexpr = TField({ eexpr = TTypeExpr (TTypeDecl t) }, "fromCharCode") } ), [cc] ) when is_string (follow (TType(t,List.map snd t.t_types))) ->
-          { e with eexpr = TNew(get_cl_from_t basic.tstring, [], [mk_cast tchar cc; mk_int gen 1 cc.epos]) }
+          { e with eexpr = TNew(get_cl_from_t basic.tstring, [], [mk_cast tchar (run cc); mk_int gen 1 cc.epos]) }
         | TCall( ( { eexpr = TField(ef, ("charAt" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("charCodeAt" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("indexOf" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("lastIndexOf" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("split" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("substr" as field)) } ), args ) when is_string ef.etype ->
-          { e with eexpr = TCall(mk_static_field_access_infer string_ext field e.epos [], [ef] @ args) }
+          { e with eexpr = TCall(mk_static_field_access_infer string_ext field e.epos [], [run ef] @ (List.map run args)) }
         
         | TCast(expr, _) when is_int_float e.etype && not (is_int_float expr.etype) ->
           let needs_cast = match gen.gfollow#run_f e.etype with
@@ -204,6 +204,39 @@ struct
           
         | TBinop( Ast.OpUShr, e1, e2 ) ->
           mk_cast e.etype { e with eexpr = TBinop( Ast.OpShr, mk_cast (TType(uint,[])) (run e1), run e2 ) }
+        
+        | TBinop( Ast.OpAssignOp Ast.OpUShr, e1, e2 ) ->
+          let mk_ushr local = 
+            { e with eexpr = TBinop(Ast.OpAssign, local, run { e with eexpr = TBinop(Ast.OpUShr, local, run e2) }) }
+          in
+          
+          let mk_local obj =
+            let var = mk_temp gen "opUshr" obj.etype in
+            let added = { obj with eexpr = TVars([var, Some(obj)]); etype = basic.tvoid } in
+            let local = mk_local var obj.epos in
+            local, added
+          in
+          
+          let e1 = run e1 in
+          
+          let ret = match e1.eexpr with
+            | TField({ eexpr = TLocal _ }, _)
+            | TField({ eexpr = TTypeExpr _ }, _)
+            | TArray({ eexpr = TLocal _ }, _)
+            | TLocal(_) -> 
+              mk_ushr e1
+            | TField(fexpr, field) ->
+              let local, added = mk_local fexpr in
+              { e with eexpr = TBlock([ added; mk_ushr { e1 with eexpr = TField(local, field) }  ]); }
+            | TArray(ea1, ea2) ->
+              let local, added = mk_local ea1 in
+              { e with eexpr = TBlock([ added; mk_ushr { e1 with eexpr = TArray(local, ea2) }  ]); }
+            | _ -> (* invalid left-side expression *)
+              assert false
+          in
+          
+          ret
+        
         | _ -> Type.map_expr run e
     in
     run
@@ -213,6 +246,86 @@ struct
     gen.gsyntax_filters#add ~name:name ~priority:(PCustom priority) map
   
 end;;
+
+(* Type Parameters Handling *)
+let handle_type_params gen ifaces =
+  let basic = gen.gcon.basic in
+    (*
+      starting to set gtparam_cast.
+    *)
+    
+    (* NativeArray: the most important. *)
+    
+    (*
+      var new_arr = new NativeArray<TO_T>(old_arr.Length);
+      var i = -1;
+      while( i < old_arr.Length )
+      {
+        new_arr[i] = (TO_T) old_arr[i];
+      }
+    *)
+    
+    let native_arr_cl = get_cl ( get_type gen (["cs"], "NativeArray") ) in
+    
+    let get_narr_param t = match follow t with
+      | TInst({ cl_path = (["cs"], "NativeArray") }, [param]) -> param
+      | _ -> assert false
+    in
+    
+    let gtparam_cast_native_array e to_t =
+      let old_param = get_narr_param e.etype in
+      let new_param = get_narr_param to_t in
+      
+      let new_v = mk_temp gen "new_arr" to_t in
+      let i = mk_temp gen "i" basic.tint in
+      let old_len = { eexpr = TField(e, "Length"); etype = basic.tint; epos = e.epos } in
+      let block = [
+        { 
+          eexpr = TVars(
+          [ 
+            new_v, Some( {
+              eexpr = TNew(native_arr_cl, [new_param], [old_len] );
+              etype = to_t;
+              epos = e.epos
+            } );
+            i, Some( mk_int gen (-1) e.epos )
+          ]); 
+          etype = basic.tvoid; 
+          epos = e.epos };
+        { 
+          eexpr = TWhile(
+            { 
+              eexpr = TBinop(
+                Ast.OpLt, 
+                { eexpr = TUnop(Ast.Increment, Ast.Prefix, mk_local i e.epos); etype = basic.tint; epos = e.epos },
+                old_len
+              );
+              etype = basic.tbool;
+              epos = e.epos
+            },
+            {
+              eexpr = TBinop(
+                Ast.OpAssign,
+                { eexpr = TArray(mk_local new_v e.epos, mk_local i e.epos); etype = new_param; epos = e.epos },
+                mk_cast new_param (mk_cast t_dynamic { eexpr = TArray(e, mk_local i e.epos); etype = old_param; epos = e.epos })
+              );
+              etype = new_param;
+              epos = e.epos
+            },
+            Ast.NormalWhile
+          );
+          etype = basic.tvoid;
+          epos = e.epos;
+        };
+        mk_local new_v e.epos
+      ] in
+      { eexpr = TBlock(block); etype = to_t; epos = e.epos }
+    in
+    
+    Hashtbl.add gen.gtparam_cast (["cs"], "NativeArray") gtparam_cast_native_array;
+    (* end set gtparam_cast *)
+  
+  TypeParams.RealTypeParams.default_config gen (fun e t -> gen.gcon.warning ("Cannot cast to " ^ (debug_type t)) e.epos; mk_cast t e) ifaces
  
 let connecting_string = "?" (* ? see list here http://www.fileformat.info/info/unicode/category/index.htm and here for C# http://msdn.microsoft.com/en-us/library/aa664670.aspx *)
 let default_package = "cs" (* I'm having this separated as I'm still not happy with having a cs package. Maybe dotnet would be better? *)
@@ -333,7 +446,7 @@ let configure gen =
     | (ns,clname) -> path_s (change_ns ns, change_clname clname)
   in
   
-  let ifaces = ref (Hashtbl.create 0) in
+  let ifaces = Hashtbl.create 1 in
   
   let ti64 = match ( get_type gen ([], "Int64") ) with | TTypeDecl t -> TType(t,[]) | _ -> assert false in
   
@@ -346,12 +459,12 @@ let configure gen =
       | TInst(_, []) -> t
       | TInst(cl, params) when 
         List.exists (fun t -> match follow t with | TDynamic _ -> true | _ -> false) params &&
-        Hashtbl.mem !ifaces cl.cl_path -> 
-          TInst(Hashtbl.find !ifaces cl.cl_path, [])
+        Hashtbl.mem ifaces cl.cl_path -> 
+          TInst(Hashtbl.find ifaces cl.cl_path, [])
       | TEnum(e, params) when
         List.exists (fun t -> match follow t with | TDynamic _ -> true | _ -> false) params &&
-        Hashtbl.mem !ifaces e.e_path -> 
-          TInst(Hashtbl.find !ifaces e.e_path, [])
+        Hashtbl.mem ifaces e.e_path -> 
+          TInst(Hashtbl.find ifaces e.e_path, [])
       | TInst(cl, params) -> TInst(cl, change_param_type (TClassDecl cl) params)
       | TEnum(e, params) -> TEnum(e, change_param_type (TEnumDecl e) params)
       (* | TType({ t_path = ([], "Null") }, [t]) -> TInst(null_t, [t]) *)
@@ -942,6 +1055,25 @@ let configure gen =
         true
     in
     
+    let is_main = 
+      match gen.gcon.main_class with
+        | Some ( (_,"Main") as path) when path = cl.cl_path ->
+          (* 
+            for cases where the main class is called Main, there will be a problem with creating the entry point there. 
+            In this special case, a special entry point class will be created 
+          *)
+          write w "public class EntryPoint__Main";
+          begin_block w;
+          write w "public static void Main()";
+          begin_block w;
+          print w "global::%s.main();" (path_s path);
+          end_block w;
+          end_block w;
+          false
+        | Some path when path = cl.cl_path -> true
+        | _ -> false
+    in
+    
     let clt, access, modifiers = get_class_modifiers cl.cl_meta (if cl.cl_interface then "interface" else "class") "public" [] in
     let is_final = clt = "struct" || has_meta ":final" cl.cl_meta in
     
@@ -967,14 +1099,12 @@ let configure gen =
     in
     loop cl.cl_meta;
     
-    (match gen.gcon.main_class with
-      | Some path when path = cl.cl_path ->
-        write w "public static void Main()";
-        begin_block w;
-        write w "main();";
-        end_block w
-      | _ -> ()
-    );
+    if is_main then begin
+      write w "public static void Main()";
+      begin_block w;
+      write w "main();";
+      end_block w
+    end;
     
     (match cl.cl_init with
       | None -> ()
@@ -1164,18 +1294,19 @@ let configure gen =
     mk_cast ecall.etype { ecall with eexpr = TCall(infer, call_args) }
   in
   
+  handle_type_params gen ifaces;
+  
   let rcf_ctx = ReflectionCFs.new_ctx gen closure_t object_iface true rcf_on_getset_field rcf_on_call_field (fun hash hash_array ->
     { hash with eexpr = TCall(rcf_static_find, [hash; hash_array]); etype=basic.tint }
-  ) (fun hash -> { hash with eexpr = TCall(rcf_static_lookup, [hash]); etype = gen.gcon.basic.tstring } ) in
+  ) (fun hash -> { hash with eexpr = TCall(rcf_static_lookup, [hash]); etype = gen.gcon.basic.tstring } ) true in
   
-  ReflectionCFs.set_universal_base_class gen (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"HxObject")) ) object_iface dynamic_object;
+  ReflectionCFs.UniversalBaseClass.default_config gen (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"HxObject")) ) object_iface dynamic_object;
   
   ReflectionCFs.implement_class_methods rcf_ctx ( get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Class")) );
   
   ReflectionCFs.configure_dynamic_field_access rcf_ctx false;
   
   let closure_func = ReflectionCFs.implement_closure_cl rcf_ctx ( get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Closure")) ) in
-  
   
   ReflectionCFs.configure rcf_ctx;
   
@@ -1365,90 +1496,11 @@ let configure gen =
       | _ -> assert false
   ) true ) ;
   
-  (*
-    starting to set gtparam_cast.
-  *)
-  
-  (* NativeArray: the most important. *)
-  
-  (*
-    var new_arr = new NativeArray<TO_T>(old_arr.Length);
-    var i = -1;
-    while( i < old_arr.Length )
-    {
-      new_arr[i] = (TO_T) old_arr[i];
-    }
-  *)
-  
-  let native_arr_cl = get_cl ( get_type gen (["cs"], "NativeArray") ) in
-  
-  let get_narr_param t = match follow t with
-    | TInst({ cl_path = (["cs"], "NativeArray") }, [param]) -> param
-    | _ -> assert false
-  in
-  
-  let gtparam_cast_native_array e to_t =
-    let old_param = get_narr_param e.etype in
-    let new_param = get_narr_param to_t in
-    
-    let new_v = mk_temp gen "new_arr" to_t in
-    let i = mk_temp gen "i" basic.tint in
-    let old_len = { eexpr = TField(e, "Length"); etype = basic.tint; epos = e.epos } in
-    let block = [
-      { 
-        eexpr = TVars(
-        [ 
-          new_v, Some( {
-            eexpr = TNew(native_arr_cl, [new_param], [old_len] );
-            etype = to_t;
-            epos = e.epos
-          } );
-          i, Some( mk_int gen (-1) e.epos )
-        ]); 
-        etype = basic.tvoid; 
-        epos = e.epos };
-      { 
-        eexpr = TWhile(
-          { 
-            eexpr = TBinop(
-              Ast.OpLt, 
-              { eexpr = TUnop(Ast.Increment, Ast.Prefix, mk_local i e.epos); etype = basic.tint; epos = e.epos },
-              old_len
-            );
-            etype = basic.tbool;
-            epos = e.epos
-          },
-          {
-            eexpr = TBinop(
-              Ast.OpAssign,
-              { eexpr = TArray(mk_local new_v e.epos, mk_local i e.epos); etype = new_param; epos = e.epos },
-              mk_cast new_param (mk_cast t_dynamic { eexpr = TArray(e, mk_local i e.epos); etype = old_param; epos = e.epos })
-            );
-            etype = new_param;
-            epos = e.epos
-          },
-          Ast.NormalWhile
-        );
-        etype = basic.tvoid;
-        epos = e.epos;
-      };
-      mk_local new_v e.epos
-    ] in
-    { eexpr = TBlock(block); etype = to_t; epos = e.epos }
-  in
-  
-  Hashtbl.add gen.gtparam_cast (["cs"], "NativeArray") gtparam_cast_native_array;
-  
-  (* end set gtparam_cast *)
-  
-  let my_ifaces = TypeParams.RealTypeParams.configure gen (fun e t -> gen.gcon.warning ("Cannot cast to " ^ (debug_type t)) e.epos; mk_cast t e) in
-  
-  ifaces := my_ifaces;
-  
   ExpressionUnwrap.configure gen (ExpressionUnwrap.traverse gen (fun e -> Some { eexpr = TVars([mk_temp gen "expr" e.etype, Some e]); etype = gen.gcon.basic.tvoid; epos = e.epos }));
   
   IntDivisionSynf.configure gen (IntDivisionSynf.default_implementation gen true);
   
+  let native_arr_cl = get_cl ( get_type gen (["cs"], "NativeArray") ) in
   ArrayDeclSynf.configure gen (ArrayDeclSynf.default_implementation gen native_arr_cl);
   
   let goto_special = alloc_var "__goto__" t_dynamic in

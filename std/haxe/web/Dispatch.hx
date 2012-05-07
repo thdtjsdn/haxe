@@ -215,9 +215,12 @@ class Dispatch {
 		case DRMeta(r):
 			loop(args, r);
 			var c = Type.getClass(cfg.obj);
-			if( c == null ) throw "assert";
-			var m = Reflect.field(haxe.rtti.Meta.getFields(c), name);
-			if( m == null ) throw "assert";
+			var m;
+			do {
+				if( c == null ) throw "assert";
+				m = Reflect.field(haxe.rtti.Meta.getFields(c), name);
+				c = Type.getSuperClass(c);
+			} while( m == null );
 			for( mv in Reflect.fields(m) )
 				onMeta(mv, Reflect.field(m, mv));
 		}
@@ -344,17 +347,23 @@ class Dispatch {
 			// store the config inside the class metadata (only once)
 			if( !i.meta.has("dispatchConfig") ) {
 				var fields = {};
-				for( f in i.fields.get() ) {
-					if( f.name.substr(0, 2) != "do" )
-						continue;
-					var r = makeRule(f);
-					for( m in f.meta.get() )
-						if( m.name.charAt(0) != ":" ) {
-							checkMeta(f);
-							r = DRMeta(r);
-							break;
-						}
-					Reflect.setField(fields, f.name.charAt(2).toLowerCase() + f.name.substr(3), r);
+				var tmp = i;
+				while( true ) {
+					for( f in tmp.fields.get() ) {
+						if( f.name.substr(0, 2) != "do" )
+							continue;
+						var r = makeRule(f);
+						for( m in f.meta.get() )
+							if( m.name.charAt(0) != ":" ) {
+								checkMeta(f);
+								r = DRMeta(r);
+								break;
+							}
+						Reflect.setField(fields, f.name.charAt(2).toLowerCase() + f.name.substr(3), r);
+					}
+					if( tmp.superClass == null )
+						break;
+					tmp = tmp.superClass.t.get();
 				}
 				if( Reflect.fields(fields).length == 0 )
 					Context.error("No dispatch method found", p);

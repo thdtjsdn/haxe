@@ -512,7 +512,7 @@ struct
         | TField( ef, "length" ) when is_string ef.etype ->
           { e with eexpr = TCall(Type.map_expr run e, []) }
         | TCall( ( { eexpr = TField({ eexpr = TTypeExpr (TTypeDecl t) }, "fromCharCode") } ), [cc] ) when is_string (follow (TType(t,List.map snd t.t_types))) ->
-          { e with eexpr = TNew(get_cl_from_t basic.tstring, [], [mk_cast tchar cc; mk_int gen 1 cc.epos]) }
+          { e with eexpr = TNew(get_cl_from_t basic.tstring, [], [mk_cast tchar (run cc); mk_int gen 1 cc.epos]) }
         | TCall( ( { eexpr = TField(ef, ("charAt" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("charCodeAt" as field)) } ), args )
         | TCall( ( { eexpr = TField(ef, ("split" as field)) } ), args )
@@ -702,15 +702,15 @@ let configure gen =
     | (ns,clname) -> path_s (change_ns ns, change_clname clname)
   in
   
-  let cl_cl = get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Class")) in
+  let cl_cl = get_cl (Hashtbl.find gen.gtypes (["java";"lang"],"Class")) in
   
   let rec real_type t =
     let t = gen.gfollow#run_f t in
     match t with
       | TInst( { cl_path = (["haxe"], "Int32") }, [] ) -> gen.gcon.basic.tint
       | TInst( { cl_path = (["haxe"], "Int64") }, [] ) -> ti64
-      | TInst( { cl_path = ([], "Class") }, _  )
-      | TInst( { cl_path = ([], "Enum") }, _  ) -> TInst(cl_cl,[])
+      | TInst( { cl_path = ([], "Class") }, p  )
+      | TInst( { cl_path = ([], "Enum") }, p  ) -> TInst(cl_cl,p)
       | TEnum _
       | TInst _ -> t
       | TType({ t_path = ([], "Null") }, [t]) when is_java_basic_type t -> t_dynamic
@@ -763,7 +763,7 @@ let configure gen =
       | TInst ({ cl_kind = KTypeParameter; cl_path=p }, []) -> snd p
       | TMono r -> (match !r with | None -> "java.lang.Object" | Some t -> t_s (run_follow gen t))
       | TInst ({ cl_path = [], "String" }, []) -> "java.lang.String"
-      | TInst ({ cl_path = [], "Class" }, _) | TInst ({ cl_path = [], "Enum" }, _) -> "haxe.lang.Class"
+      | TInst ({ cl_path = [], "Class" }, _) | TInst ({ cl_path = [], "Enum" }, _) -> assert false (* should have been converted earlier *)
       | TEnum (({e_path = p;} as e), params) -> (path_param_s (TEnumDecl e) p params)
       | TInst (({cl_path = p;} as cl), params) -> (path_param_s (TClassDecl cl) p params)
       | TType (({t_path = p;} as t), params) -> (path_param_s (TTypeDecl t) p params)
@@ -844,6 +844,19 @@ let configure gen =
         t_s (TType(t, []))
   in
   
+  (*
+    it seems that Java doesn't like when you create a new array with the type parameter defined
+    so we'll just ignore all type parameters, and hope for the best!
+  *)
+  let rec transform_nativearray_t t = match real_type t with
+    | TInst( ({ cl_path = (["java"], "NativeArray") } as narr), [t]) ->
+      TInst(narr, [transform_nativearray_t t])
+    | TInst(cl, params) -> TInst(cl, List.map (fun _ -> t_dynamic) params)
+    | TEnum(e, params) -> TEnum(e, List.map (fun _ -> t_dynamic) params)
+    | TType(t, params) -> TType(t, List.map (fun _ -> t_dynamic) params)
+    | _ -> t
+  in
+  
   let expr_s w e =
     in_value := false;
     let rec expr_s w e =
@@ -878,6 +891,7 @@ let configure gen =
             | TThis -> write w "this"
             | TSuper -> write w "super")
         | TLocal { v_name = "__fallback__" } -> ()
+        | TLocal { v_name = "__sbreak__" } -> write w "break"
         | TLocal { v_name = "__undefined__" } ->
           write w (t_s (TInst(runtime_cl, List.map (fun _ -> t_dynamic) runtime_cl.cl_types)));
           write w ".undefined";
@@ -914,20 +928,7 @@ let configure gen =
           ) 0 el);
           write w "}) )"
         | TArrayDecl el ->
-          (*
-            it seems that Java doesn't like when you create a new array with the type parameter defined
-            so we'll just ignore all type parameters, and hope for the best!
-          *)
-          let rec transform_t t = match gen.gfollow#run_f t with
-            | TInst( ({ cl_path = (["java"], "NativeArray") } as narr), [t]) ->
-              TInst(narr, [transform_t t])
-            | TInst(cl, params) -> TInst(cl, List.map (fun _ -> t_dynamic) params)
-            | TEnum(e, params) -> TEnum(e, List.map (fun _ -> t_dynamic) params)
-            | TType(t, params) -> TType(t, List.map (fun _ -> t_dynamic) params)
-            | _ -> t
-          in
-          
-          print w "new %s" (param_t_s (transform_t e.etype));
+          print w "new %s" (param_t_s (transform_nativearray_t e.etype));
           let is_double = match follow e.etype with
            | TInst(_,[ t ]) -> ( match follow t with | TInst({ cl_path=([],"Float") },[]) -> Some t | _ -> None )
            | _ -> None
@@ -1001,7 +1002,7 @@ let configure gen =
               | TInst({ cl_path = (["java"], "NativeArray") }, [param]) ->
                 (check_t_s param (times+1))
               | _ -> 
-                print w "new %s[" (t_s (run_follow gen t));
+                print w "new %s[" (t_s (transform_nativearray_t t));
                 expr_s w size;
                 print w "]";
                 let rec loop i =
@@ -1113,8 +1114,6 @@ let configure gen =
             in_value := false;
             expr_s w (mk_block e);
             newline w;
-            
-            (if not (JavaSpecificSynf.is_final_return_expr true e) then write w "break;");
             newline w
           ) ele_l;
           if is_some default then begin
@@ -1123,7 +1122,6 @@ let configure gen =
             in_value := false;
             expr_s w (get default);
             newline w;
-            (if not (JavaSpecificSynf.is_final_return_expr true (get default)) then write w "break;");
           end;
           end_block w
         | TTry (tryexpr, ve_l) ->
@@ -1205,7 +1203,34 @@ let configure gen =
       | Method mkind -> 
         let is_virtual = is_new || (not is_final && match mkind with | MethInline -> false | _ when not is_new -> true | _ -> false) in
         let is_override = match cf.cf_name with
-          | "toString" | "equals" when not is_static -> true
+          | "equals" when not is_static ->
+            (match cf.cf_type with
+              | TFun([_,_,t], ret) ->
+                (match (real_type t, real_type ret) with 
+                  | TDynamic _, TEnum( { e_path = ([], "Bool") }, [])
+                  | TAnon _, TEnum( { e_path = ([], "Bool") }, []) -> true
+                  | _ -> List.mem cf.cf_name cl.cl_overrides 
+                )
+              | _ -> List.mem cf.cf_name cl.cl_overrides)
+          | "toString" when not is_static ->
+            (match cf.cf_type with
+              | TFun([], ret) ->
+                (match real_type ret with
+                  | TInst( { cl_path = ([], "String") }, []) -> true
+                  | _ -> gen.gcon.error "A toString() function should return a String!" cf.cf_pos; false
+                )
+              | _ -> List.mem cf.cf_name cl.cl_overrides
+            )
+          | "hashCode" when not is_static ->
+            (match cf.cf_type with
+              | TFun([], ret) ->
+                (match real_type ret with
+                  | TInst( { cl_path = ([], "Int") }, []) ->
+                    true
+                  | _ -> gen.gcon.error "A hashCode() function should return an Int!" cf.cf_pos; false
+                )
+              | _ -> List.mem cf.cf_name cl.cl_overrides
+            )
           | _ -> List.mem cf.cf_name cl.cl_overrides 
         in
         let visibility = if is_interface then "" else "public" in
@@ -1484,15 +1509,30 @@ let configure gen =
   
   let rcf_ctx = ReflectionCFs.new_ctx gen closure_t object_iface false rcf_on_getset_field rcf_on_call_field (fun hash hash_array ->
     { hash with eexpr = TCall(rcf_static_find, [hash; hash_array]); etype=basic.tint }
-  ) (fun hash -> hash ) in
+  ) (fun hash -> hash ) false in
   
-  ReflectionCFs.set_universal_base_class gen (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"HxObject")) ) object_iface dynamic_object;
-  
-  ReflectionCFs.implement_class_methods rcf_ctx ( get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Class")) );
+  ReflectionCFs.UniversalBaseClass.default_config gen (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"HxObject")) ) object_iface dynamic_object;
   
   ReflectionCFs.configure_dynamic_field_access rcf_ctx false;
   
   let closure_func = ReflectionCFs.implement_closure_cl rcf_ctx ( get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Closure")) ) in
+  
+  let closure_func eclosure e field is_static =
+    let is_hxobject = match real_type e.etype with
+      | TInst(cl,_) -> is_hxgen (TClassDecl cl)
+      | TEnum(e, _) -> is_hxgen (TEnumDecl e)
+      | TType(t, _) -> is_hxgen (TTypeDecl t)
+      | TDynamic _ | TAnon _ -> false
+      | _ -> assert false
+    in
+    if is_hxobject then 
+      closure_func eclosure e field is_static 
+    else begin
+      let static = mk_static_field_access_infer (runtime_cl) "closure" eclosure.epos [] in
+      let field = { eexpr = TConst(TString field); etype = basic.tstring; epos = eclosure.epos } in
+      mk_cast eclosure.etype { eclosure with eexpr = TCall(static, [ e; field ]); etype = t_dynamic }
+    end
+  in
   
   ReflectionCFs.implement_varargs_cl rcf_ctx ( get_cl (get_type gen (["haxe";"lang"], "VarArgsBase")) );
   
@@ -1641,31 +1681,11 @@ let configure gen =
       (fun v e -> e)
   );
   
-  let native_class_wrapper = get_cl (get_type gen (["haxe";"lang"], "NativeClassWrapper")) in
-  
   let get_typeof e =
     { e with eexpr = TCall( { eexpr = TLocal( alloc_var "__typeof__" t_dynamic ); etype = t_dynamic; epos = e.epos }, [e] ) }
   in
   
-  ClassInstance.configure gen (ClassInstance.traverse gen (fun e mt ->
-    if is_hxgen mt then begin
-      {
-        eexpr = TCall({
-          eexpr = TField(e, gen.gmk_internal_name "hx" "getClassStatic");
-          etype = TFun([], e.etype);
-          epos = e.epos
-        }, []);
-        etype = e.etype;
-        epos = e.epos;
-      }
-    end else begin
-      {
-        eexpr = TNew(native_class_wrapper, [], [ get_typeof e ]);
-        etype = e.etype;
-        epos = e.epos
-      }
-    end
-  ));
+  ClassInstance.configure gen (ClassInstance.traverse gen (fun e mt -> get_typeof e));
   
   (*let v = alloc_var "$type_param" t_dynamic in*)
   TypeParams.configure gen (fun ecall efield params elist ->
@@ -1697,7 +1717,7 @@ let configure gen =
   
   IntDivisionSynf.configure gen (IntDivisionSynf.default_implementation gen true);
   
-  UnreachableCodeEliminationSynf.configure gen (UnreachableCodeEliminationSynf.traverse gen true);
+  UnreachableCodeEliminationSynf.configure gen (UnreachableCodeEliminationSynf.traverse gen true true true);
   
   ArrayDeclSynf.configure gen (ArrayDeclSynf.default_implementation gen native_arr_cl);
   
