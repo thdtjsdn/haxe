@@ -520,7 +520,7 @@ and wait_loop boot_com host port =
 				read_loop()
 		in
 		let rec cache_context com =
-			if not com.dead_code_elimination then begin
+			if not com.dead_code_elimination && not com.display then begin
 				List.iter cache_module com.modules;
 				if verbose then print_endline ("Cached " ^ string_of_int (List.length com.modules) ^ " modules");
 			end;
@@ -669,7 +669,7 @@ try
 			if Sys.os_type = "Unix" then
 				com.class_path <- ["/usr/lib/haxe/std/";"/usr/local/lib/haxe/std/";"";"/"]
 			else
-				let base_path = normalize_path (try executable_path() with _ -> "./") in
+				let base_path = normalize_path (Extc.get_real_path (try executable_path() with _ -> "./")) in
 				com.class_path <- [base_path ^ "std/";""]);
 	com.std_path <- List.filter (fun p -> ExtString.String.ends_with p "std/" || ExtString.String.ends_with p "std\\") com.class_path;
 	let set_platform pf file =

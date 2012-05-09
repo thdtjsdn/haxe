@@ -497,6 +497,30 @@ class Main {
 		}
 		return true;
 	}
+	
+	function safeDelete( file ) {
+		try
+		{
+			sys.FileSystem.deleteFile(file);
+			return true;
+		}
+		catch (e:Dynamic)
+		{
+			if (neko.Sys.systemName() == "Windows")
+			{
+				try
+				{
+					neko.Sys.command("attrib -R \"" +file+ "\"");
+					sys.FileSystem.deleteFile(file);
+					return true;
+				} catch (e:Dynamic)
+				{
+				}
+			}
+			
+			return false;
+		}
+	}
 
 	function getRepository( ?setup : Bool ) {
 		var sysname = Sys.systemName();
@@ -623,7 +647,7 @@ class Main {
 			if( sys.FileSystem.isDirectory(path) )
 				deleteRec(path);
 			else
-				sys.FileSystem.deleteFile(path);
+				safeDelete(path);
 		}
 		sys.FileSystem.deleteDirectory(dir);
 	}
@@ -633,11 +657,11 @@ class Main {
 		var version = paramOpt();
 		var rep = getRepository();
 		var pdir = rep + Datas.safe(prj);
-		if ( sys.FileSystem.exists(pdir + "/git"))
-		{
-			print("Removing git libs is currently not supported.");
-			return;
-		}
+		//if ( sys.FileSystem.exists(pdir + "/git"))
+		//{
+			//print("Removing git libs is currently not supported.");
+			//return;
+		//}
 		if( version == null ) {
 			if( !sys.FileSystem.exists(pdir) )
 				throw "Library "+prj+" is not installed";
@@ -750,6 +774,25 @@ class Main {
 	}
 
 	function git() {
+		var gitExists = function()
+			try { command("git", []); return true; } catch (e:Dynamic) return false;
+		if (!gitExists())
+		{
+			var match = ~/(.*)git([\\|\/])cmd$/ ;
+			for (path in Sys.getEnv("PATH").split(";"))
+			{
+				if (match.match(path.toLowerCase()))
+				{
+					var newPath = match.matched(1) + "git" +match.matched(2) + "bin";
+					Sys.putEnv("PATH", Sys.getEnv("PATH") + ";" +newPath);
+				}
+			}
+			if (!gitExists())
+			{
+				print("Could not execute git, please make sure it is installed and available in your PATH.");
+				return;
+			}
+		}
 		var libName = param("Library name");
 		var rep = getRepository();
 		var libPath = rep + Datas.safe(libName) + "/git";
@@ -762,19 +805,19 @@ class Main {
 		var gitPath = param("Git path");
 		var subDir = paramOpt();
 		
-		var split = gitPath.split("@");
-		var rev = if (split.length == 2) {
-			gitPath = split[0];
-			split[1];
+		var match = ~/@([0-9]+)/;
+		var rev = if (match.match(gitPath) && match.matchedRight() == "")
+		{
+			gitPath = match.matchedLeft();
+			match.matched(1);
 		}
 		else
 			null;
-				
+
 		print("Installing " +libName + " from " +gitPath);
-		var ret = command("git", ["clone", gitPath, libPath]);
-		if (ret.code != 0)
+		if (neko.Sys.command("git clone \"" +gitPath + "\" \"" +libPath + "\"") != 0)
 		{
-			print("Could not clone git repository: " +ret.out);
+			print("Could not clone git repository");
 			return;
 		}
 		Sys.setCwd(libPath);

@@ -432,7 +432,12 @@ let using_field ctx mode e i p =
 				let t = field_type f in
 				(match follow t with
 				| TFun ((_,_,t0) :: args,r) ->
-					(try unify_raise ctx e.etype t0 p with Error (Unify _,_) -> raise Not_found);
+					let t0 = (try match t0 with
+					| TType({t_path=["haxe";"macro"], ("ExprOf"|"ExprRequire")}, [t]) ->
+						(try unify_raise ctx e.etype t p with Error (Unify _,_) -> raise Not_found); t;
+					| _ -> raise Not_found
+					with Not_found ->
+						(try unify_raise ctx e.etype t0 p with Error (Unify _,_) -> raise Not_found); t0) in
 					if follow e.etype == t_dynamic && follow t0 != t_dynamic then raise Not_found;
 					let et = type_module_type ctx (TClassDecl c) None p in
 					AKUsing (mk (TField (et,i)) t p,f,e)
@@ -577,6 +582,10 @@ let rec type_field ctx e i p mode =
 			loop_dyn c params
 		with Not_found ->
 			if PMap.mem i c.cl_statics then error ("Cannot access static field " ^ i ^ " from a class instance") p;
+			(*
+				This is a fix to deal with optimize_completion which will call iterator()
+				on the expression for/in, which vectors do no have.
+			*)
 			if ctx.com.display && i = "iterator" && c.cl_path = (["flash"],"Vector") then begin
 				let it = TAnon {
 					a_fields = PMap.add "next" (mk_field "next" (TFun([],List.hd params)) p) PMap.empty;
@@ -1771,6 +1780,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 					List.iter (fun f ->
 						let f = { f with cf_type = opt_type f.cf_type } in
 						match follow (field_type f) with
+						| TFun((_,_,TType({t_path=["haxe";"macro"], ("ExprOf"|"ExprRequire")}, [t])) :: args, ret)
 						| TFun ((_,_,t) :: args, ret) when (try unify_raise ctx (dup e.etype) t e.epos; true with _ -> false) ->
 							let f = { f with cf_type = TFun (args,ret); cf_params = [] } in
 							if follow e.etype == t_dynamic && follow t != t_dynamic then
@@ -1888,86 +1898,80 @@ and type_call ctx e el p =
 		(match e with
 		| EField ((EConst (Ident "super"),_),_) , _ | EType ((EConst (Ident "super"),_),_) , _ -> ctx.in_super_call <- true
 		| _ -> ());
-		match type_access ctx (fst e) (snd e) MCall with
-		| AKInline (ethis,f,t) ->
-			let params, tret = (match follow t with
-				| TFun (args,r) -> unify_call_params ctx (Some (f.cf_name,f.cf_meta)) el args r p true
-				| _ -> error (s_type (print_context()) t ^ " cannot be called") p
-			) in
-			make_call ctx (mk (TField (ethis,f.cf_name)) t p) params tret p
-		| AKUsing (et,ef,eparam) ->
-			(match et.eexpr with
-			| TField (ec,_) ->
-				(match type_field ctx ec ef.cf_name p MCall with
-				| AKMacro _ ->
-					(match ec.eexpr with
-					| TTypeExpr (TClassDecl c) ->
-						let e = (match fst e with
-							| EField (e,f) -> if f <> ef.cf_name then assert false; e
-							| EConst (Ident f | Type f) -> if f <> ef.cf_name then assert false; (EConst (Ident "this"),snd e)
-							| _ -> error "Unsupported" (snd e)
+		let rec loop acc el =
+			match acc with
+			| AKInline (ethis,f,t) ->
+				let params, tret = (match follow t with
+					| TFun (args,r) -> unify_call_params ctx (Some (f.cf_name,f.cf_meta)) el args r p true
+					| _ -> error (s_type (print_context()) t ^ " cannot be called") p
+				) in
+				make_call ctx (mk (TField (ethis,f.cf_name)) t p) params tret p
+			| AKUsing (et,ef,eparam) ->
+				(match et.eexpr with
+				| TField (ec,_) ->
+					let acc = (type_field ctx ec ef.cf_name p MCall) in
+					(match acc with
+					| AKMacro _ ->
+						loop acc (Interp.make_ast eparam :: el)
+					| AKExpr _ | AKField _ | AKInline _ ->
+						let params, tret = (match follow et.etype with
+							| TFun ( _ :: args,r) -> unify_call_params ctx (Some (ef.cf_name,ef.cf_meta)) el args r p (ef.cf_kind = Method MethInline)
+							| _ -> assert false
 						) in
-						(match ctx.g.do_macro ctx MExpr c.cl_path ef.cf_name (e :: el) p with
-						| None -> type_expr ctx (EConst (Ident "null"),p)
-						| Some e -> type_expr ctx e)
+						make_call ctx et (eparam::params) tret p
 					| _ -> assert false)
-				| AKExpr _ | AKField _ | AKInline _ ->
-					let params, tret = (match follow et.etype with
-						| TFun ( _ :: args,r) -> unify_call_params ctx (Some (ef.cf_name,ef.cf_meta)) el args r p (ef.cf_kind = Method MethInline)
-						| _ -> assert false
-					) in
-					make_call ctx et (eparam::params) tret p
 				| _ -> assert false)
-			| _ -> assert false)
-		| AKMacro (ethis,f) ->
-			(match ethis.eexpr with
-			| TTypeExpr (TClassDecl c) ->
-				(match ctx.g.do_macro ctx MExpr c.cl_path f.cf_name el p with
-				| None -> type_expr ctx (EConst (Ident "null"),p)
-				| Some e -> type_expr ctx e)
-			| _ ->
-				(* member-macro call : since we will make a static call, let's found the actual class and not its subclass *)
-				(match follow ethis.etype with
-				| TInst (c,_) ->
-					let rec loop c =
-						if PMap.mem f.cf_name c.cl_fields then
-							match ctx.g.do_macro ctx MExpr c.cl_path f.cf_name (Interp.make_ast ethis :: el) p with
-							| None -> type_expr ctx (EConst (Ident "null"),p)
-							| Some e -> type_expr ctx e
-						else
-							match c.cl_super with
-							| None -> assert false
-							| Some (csup,_) -> loop csup
-					in
-					loop c
-				| _ -> assert false))
-		| AKNo _ | AKSet _ as acc ->
-			ignore(acc_get ctx acc p);
-			assert false
-		| AKExpr e | AKField (e,_) as acc ->
-			let el , t = (match follow e.etype with
-			| TFun (args,r) ->
-				let fopts = (match acc with AKField (_,f) -> Some (f.cf_name,f.cf_meta) | _ -> match e.eexpr with TField (e,f) -> Some (f,[]) | _ -> None) in
-				unify_call_params ctx fopts el args r p false
-			| TMono _ ->
-				let t = mk_mono() in
-				let el = List.map (type_expr ctx) el in
-				unify ctx (tfun (List.map (fun e -> e.etype) el) t) e.etype e.epos;
-				el, t
-			| t ->
-				let el = List.map (type_expr ctx) el in
-				el, if t == t_dynamic then
-					t_dynamic
-				else if ctx.untyped then
-					mk_mono()
-				else
-					error (s_type (print_context()) e.etype ^ " cannot be called") e.epos
-			) in
-			if ctx.com.dead_code_elimination then
-				(match e.eexpr, el with
-				| TField ({ eexpr = TTypeExpr (TClassDecl { cl_path = [],"Std"  }) },"string"), [ep] -> check_to_string ctx ep.etype
-				| _ -> ());
-			mk (TCall (e,el)) t p
+			| AKMacro (ethis,f) ->
+				(match ethis.eexpr with
+				| TTypeExpr (TClassDecl c) ->
+					(match ctx.g.do_macro ctx MExpr c.cl_path f.cf_name el p with
+					| None -> type_expr ctx (EConst (Ident "null"),p)
+					| Some e -> type_expr ctx e)
+				| _ ->
+					(* member-macro call : since we will make a static call, let's found the actual class and not its subclass *)
+					(match follow ethis.etype with
+					| TInst (c,_) ->
+						let rec loop c =
+							if PMap.mem f.cf_name c.cl_fields then
+								match ctx.g.do_macro ctx MExpr c.cl_path f.cf_name (Interp.make_ast ethis :: el) p with
+								| None -> type_expr ctx (EConst (Ident "null"),p)
+								| Some e -> type_expr ctx e
+							else
+								match c.cl_super with
+								| None -> assert false
+								| Some (csup,_) -> loop csup
+						in
+						loop c
+					| _ -> assert false))
+			| AKNo _ | AKSet _ as acc ->
+				ignore(acc_get ctx acc p);
+				assert false
+			| AKExpr e | AKField (e,_) as acc ->
+				let el , t = (match follow e.etype with
+				| TFun (args,r) ->
+					let fopts = (match acc with AKField (_,f) -> Some (f.cf_name,f.cf_meta) | _ -> match e.eexpr with TField (e,f) -> Some (f,[]) | _ -> None) in
+					unify_call_params ctx fopts el args r p false
+				| TMono _ ->
+					let t = mk_mono() in
+					let el = List.map (type_expr ctx) el in
+					unify ctx (tfun (List.map (fun e -> e.etype) el) t) e.etype e.epos;
+					el, t
+				| t ->
+					let el = List.map (type_expr ctx) el in
+					el, if t == t_dynamic then
+						t_dynamic
+					else if ctx.untyped then
+						mk_mono()
+					else
+						error (s_type (print_context()) e.etype ^ " cannot be called") e.epos
+				) in
+				if ctx.com.dead_code_elimination then
+					(match e.eexpr, el with
+					| TField ({ eexpr = TTypeExpr (TClassDecl { cl_path = [],"Std"  }) },"string"), [ep] -> check_to_string ctx ep.etype
+					| _ -> ());
+				mk (TCall (e,el)) t p
+		in
+		loop (type_access ctx (fst e) (snd e) MCall) el
 
 and check_to_string ctx t =
 	match follow t with

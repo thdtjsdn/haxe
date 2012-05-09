@@ -479,6 +479,12 @@ type generator_ctx =
   (* does this 'special type' needs cast to this other type? *)
   (* this is here so we can implement custom behavior for "opaque" typedefs *)
   mutable gspecial_needs_cast : t->t->bool;
+  (* sometimes we may want to support unrelated conversions on cast detection *)
+  (* for example, haxe.lang.Null<T> -> T on C# *)
+  (* every time an unrelated conversion is found, each to/from path is searched on this hashtbl *)
+  (* if found, the function will be executed with from_type, to_type. If returns true, it means that *)
+  (* it is a supported conversion, and the unsafe cast routine changes to a simple cast *)
+  gsupported_conversions : (path, t->t->bool) Hashtbl.t;
   
   (* API for filters *)
   (* add type can be called at any time, and will add a new module_def that may or may not be filtered *)
@@ -650,6 +656,7 @@ let new_ctx con =
     gon_unsafe_cast = (fun t t2 pos -> (gen.gcon.warning ("Type " ^ (debug_type t2) ^ " is being cast to the unrelated type " ^ (s_type (print_context()) t)) pos));
     gneeds_box = (fun t -> false);
     gspecial_needs_cast = (fun to_t from_t -> true);
+    gsupported_conversions = Hashtbl.create 0;
     
     gadd_type = (fun md should_filter ->
       if should_filter then begin
@@ -4295,9 +4302,34 @@ struct
         false
       | _ -> true
   
-  let do_unsafe_cast gen to_t e  =
-    gen.gon_unsafe_cast to_t e.etype e.epos;
-    mk_cast to_t (mk_cast t_dynamic e)
+  let do_unsafe_cast gen from_t to_t e  =
+    let t_path t =
+      match t with
+        | TInst(cl, _) -> cl.cl_path
+        | TEnum(e, _) -> e.e_path
+        | TType(t, _) -> t.t_path
+        | TDynamic _ -> ([], "Dynamic")
+        | _ -> raise Not_found
+    in
+    let do_default () =
+      gen.gon_unsafe_cast to_t e.etype e.epos;
+      mk_cast to_t (mk_cast t_dynamic e)
+    in
+    (* TODO: there really should be a better way to write that *)
+    try
+      if (Hashtbl.find gen.gsupported_conversions (t_path from_t)) from_t to_t then
+        mk_cast to_t e
+      else
+        do_default()
+    with
+      | Not_found ->
+        try
+          if (Hashtbl.find gen.gsupported_conversions (t_path to_t)) from_t to_t then
+            mk_cast to_t e
+          else
+            do_default()
+        with
+          | Not_found -> do_default()
   
   (* ****************************** *)
   (* cast handler *)
@@ -4307,7 +4339,7 @@ struct
     at the backend level, since most probably Anons and TInst will have a different representation there
   *)
   let rec handle_cast gen e real_to_t real_from_t =
-    let do_unsafe_cast () = do_unsafe_cast gen real_to_t { e with etype = real_from_t } in
+    let do_unsafe_cast () = do_unsafe_cast gen real_from_t real_to_t { e with etype = real_from_t } in
     let to_t, from_t = real_to_t, real_from_t in
     
     let e = { e with etype = real_from_t } in
@@ -4353,14 +4385,21 @@ struct
       | TEnum(en, params_to), TInst(cl, params_from)
       | TInst(cl, params_to), TEnum(en, params_from) ->
         (* this is here for max compatibility with EnumsToClass module *)
-        if en.e_path = cl.cl_path then
+        if en.e_path = cl.cl_path && en.e_extern then begin
           (try
             List.iter2 (type_eq (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
             e
           with 
+            | Invalid_argument("List.iter2") ->
+              (*
+                this is a hack for RealTypeParams. Since there is no way at this stage to know if the class is the actual
+                EnumsToClass derived from the enum, we need to imply from possible ArgumentErrors (because of RealTypeParams interfaces),
+                that they would only happen if they were a RealTypeParams created interface
+              *)
+              e
             | Unify_error _ -> do_unsafe_cast ()
           )
-        else
+        end else
           do_unsafe_cast ()
       | TType(t_to, params_to), TType(t_from, params_from) when t_to == t_from ->
         if gen.gspecial_needs_cast real_to_t real_from_t then
@@ -4551,12 +4590,17 @@ struct
       let was_in_value = !in_value in
       in_value := true;
       match e.eexpr with 
-        | TBinop (op,e1,e2) ->
-          (match op with
-            | OpAssign | OpAssignOp _ ->
-              { e with eexpr = TBinop(op, Type.map_expr run e1, handle (run e2) e1.etype e2.etype) }
-            | _ -> Type.map_expr run e
-          )  
+        | TBinop ( (Ast.OpAssign as op),({ eexpr = TField(tf, f) } as e1), e2 )
+        | TBinop ( (Ast.OpAssignOp _ as op),({ eexpr = TField(tf, f) } as e1), e2 ) ->
+          (match field_access gen (gen.greal_type tf.etype) f with
+            | FClassField(cl,params,_,is_static,actual_t) -> 
+              let actual_t = if is_static then actual_t else apply_params cl.cl_types params actual_t in
+              { e with eexpr = TBinop(op, Type.map_expr run e1, handle (run e2) actual_t e2.etype) }
+            | _ -> { e with eexpr = TBinop(op, Type.map_expr run e1, handle (run e2) e1.etype e2.etype) }
+          )
+        | TBinop ( (Ast.OpAssign as op),e1,e2)
+        | TBinop ( (Ast.OpAssignOp _ as op),e1,e2) ->
+          { e with eexpr = TBinop(op, Type.map_expr run e1, handle (run e2) e1.etype e2.etype) }
         | TField(ef, f) ->
           handle_type_parameter gen None e (run ef) f []
         | TArrayDecl el ->
@@ -7448,7 +7492,7 @@ struct
         false
       with | Exit -> true
     
-    let convert gen t base_class en = 
+    let convert gen t base_class en should_be_hxgen = 
       let basic = gen.gcon.basic in
       let pos = en.e_pos in
       
@@ -7474,7 +7518,10 @@ struct
         let cf = match follow ef.ef_type with 
           | TFun(params,ret) ->
             let dup_types = List.map (fun (s,t) -> (s, TInst (map_param (get_cl_t t), []))) en.e_types in
-            let cf = mk_class_field name ef.ef_type true pos (Method MethNormal) dup_types in
+            let ef_type = apply_params en.e_types (List.map snd dup_types) ef.ef_type in
+            let params, ret = get_fun ef_type in
+            
+            let cf = mk_class_field name ef_type true pos (Method MethNormal) dup_types in
             cf.cf_meta <- [];
             
             let tf_args = List.map (fun (name,opt,t) ->  (alloc_var name t, if opt then Some TNull else None) ) params in
@@ -7485,17 +7532,21 @@ struct
                 tf_type = ret;
                 tf_expr = mk_block ( mk_return { eexpr = TNew(cl,List.map snd dup_types, [mk_int gen old_i pos; arr_decl] ); etype = TInst(cl, List.map snd dup_types); epos = pos } );
               });
-              etype = ef.ef_type;
+              etype = ef_type;
               epos = pos
             } in
             cf.cf_expr <- Some expr;
             cf
           | _ ->
-            let cf = mk_class_field name ef.ef_type true pos (Var { v_read = AccNormal; v_write = AccNormal }) [] in
+            let actual_t = match follow ef.ef_type with
+              | TEnum(e, p) -> TEnum(e, List.map (fun _ -> t_empty) p)
+              | _ -> assert false
+            in
+            let cf = mk_class_field name actual_t true pos (Var { v_read = AccNormal; v_write = AccNormal }) [] in
             cf.cf_meta <- [];
             cf.cf_expr <- Some {
-              eexpr = TNew(cl, List.map (fun _ -> t_dynamic) cl.cl_types, [mk_int gen old_i pos; null (basic.tarray t_empty) pos]);
-              etype = TInst(cl, List.map (fun _ -> t_dynamic) cl.cl_types);
+              eexpr = TNew(cl, List.map (fun _ -> t_empty) cl.cl_types, [mk_int gen old_i pos; null (basic.tarray t_empty) pos]);
+              etype = TInst(cl, List.map (fun _ -> t_empty) cl.cl_types);
               epos = pos;
             };
             cf
@@ -7515,7 +7566,32 @@ struct
       cl.cl_ordered_statics <- constructs_cf :: cfs ;
       cl.cl_statics <- PMap.add "constructs" constructs_cf cl.cl_statics;
       
-      cl.cl_meta <- (":hxgen",[],cl.cl_pos) :: cl.cl_meta;
+      (if should_be_hxgen then 
+        cl.cl_meta <- (":hxgen",[],cl.cl_pos) :: cl.cl_meta
+      else begin
+        (* create the constructor *)
+        let tf_args = [ alloc_var "index" basic.tint, None; alloc_var "params" (basic.tarray t_empty), None ] in
+        let ftype = TFun(fun_args tf_args, basic.tvoid) in
+        let ctor = mk_class_field "new" ftype true pos (Method MethNormal) [] in
+        let me = TInst(cl, List.map snd cl.cl_types) in
+        ctor.cf_expr <-
+        Some {
+          eexpr = TFunction(
+          {
+            tf_args = tf_args;
+            tf_type = basic.tvoid;
+            tf_expr = mk_block {
+              eexpr = TCall({ eexpr = TConst TSuper; etype = me; epos = pos }, List.map (fun (v,_) -> mk_local v pos) tf_args);
+              etype = basic.tvoid;
+              epos = pos;
+            }
+          });
+          etype = ftype;
+          epos = pos
+        };
+        
+        cl.cl_constructor <- Some ctor
+      end);
       gen.gadd_to_module (TClassDecl cl) (max_dep);
       
       TEnumDecl en
@@ -7526,9 +7602,10 @@ struct
         convert_all : bool - should we convert all enums? If set, convert_if_has_meta will be ignored.
         convert_if_has_meta : bool - should we convert only if it has meta?
         enum_base_class : tclass - the enum base class. 
+        should_be_hxgen : bool - should the created enum be hxgen?
     *)
-    let traverse gen t convert_all convert_if_has_meta enum_base_class =
-      let convert = convert gen t enum_base_class in
+    let traverse gen t convert_all convert_if_has_meta enum_base_class should_be_hxgen =
+      let convert e = convert gen t enum_base_class e should_be_hxgen in
       let run md = match md with
         | TEnumDecl e when is_hxgen md ->
           if convert_all then 
@@ -7658,9 +7735,9 @@ struct
     
   end;;
   
-  let configure gen opt_get_native_enum_tag convert_all convert_if_has_meta enum_base_class =
+  let configure gen opt_get_native_enum_tag convert_all convert_if_has_meta enum_base_class should_be_hxgen =
     let t = new_t () in
-    EnumToClassModf.configure gen (EnumToClassModf.traverse gen t convert_all convert_if_has_meta enum_base_class);
+    EnumToClassModf.configure gen (EnumToClassModf.traverse gen t convert_all convert_if_has_meta enum_base_class should_be_hxgen);
     EnumToClassExprf.configure gen (EnumToClassExprf.traverse gen t opt_get_native_enum_tag)
   
 end;;
@@ -8056,6 +8133,7 @@ end;;
   a call to the new Null<T> creation;
   Also casts from Null<T> to T or direct uses of Null<T> (call, field access, array access, closure)
   will result in the actual value being accessed
+  For compatibility with the C# target, HardNullable will accept both Null<T> and haxe.lang.Null<T> types
   
   dependencies:
     
@@ -8069,23 +8147,25 @@ struct
   
   let priority = solve_deps name []
   
-  let rec is_null_t t = match t with
-    | TType( { t_path = ([], "Null") }, [of_t]) ->
+  let rec is_null_t gen t = match gen.greal_type t with
+    | TType( { t_path = ([], "Null") }, [of_t])
+    | TInst( { cl_path = (["haxe";"lang"], "Null") }, [of_t]) ->
       let rec take_off_null t =
-        match is_null_t t with | None -> t | Some s -> take_off_null s
+        match is_null_t gen t with | None -> t | Some s -> take_off_null s
       in
       
       Some (take_off_null of_t)
-    | TMono r -> (match !r with | Some t -> is_null_t t | None -> None)
-    | TLazy f -> is_null_t (!f())
+    | TMono r -> (match !r with | Some t -> is_null_t gen t | None -> None)
+    | TLazy f -> is_null_t gen (!f())
     | TType (t, tl) ->
-      is_null_t (apply_params t.t_types tl t.t_type)
+      is_null_t gen (apply_params t.t_types tl t.t_type)
     | _ -> None
   
   let follow_addon gen t =
     let rec strip_off_nullable t =
       let t = gen.gfollow#run_f t in
       match t with
+        (* haxe.lang.Null<haxe.lang.Null<>> wouldn't be a valid construct, so only follow Null<> *)
         | TType ( { t_path = ([], "Null") }, [of_t] ) -> strip_off_nullable of_t
         | _ -> t
     in
@@ -8104,14 +8184,15 @@ struct
           mk_cast to_t (unwrap_null e)
     in
     
-    let handle_wrap e =
+    let handle_wrap e t =
       match e.eexpr with
         | TConst(TNull) ->
-          wrap_val e false
+          wrap_val e t false
         | _ ->
-          wrap_val e true
+          wrap_val e t true
     in
     
+    let is_null_t = is_null_t gen in
     let rec run e =
       let null_et = is_null_t e.etype in
       match e.eexpr with 
@@ -8120,7 +8201,7 @@ struct
           if is_some null_vt && is_none null_et then
             handle_unwrap e.etype (run v)
           else if is_none null_vt && is_some null_et then
-            handle_wrap ({ (run v) with etype = get (is_null_t e.etype) })
+            handle_wrap (run v) (get (is_null_t e.etype))
           else
             Type.map_expr run e
         | TField(ef, field) when is_some (is_null_t ef.etype) ->
@@ -8155,7 +8236,7 @@ struct
               (* if it is Null<T>, we need to convert the result again to null *)
               let e_t = (is_null_t e.etype) in
               if is_some e_t then
-                wrap_val { eexpr = TBinop(op, e1, e2); etype = get e_t; epos = e.epos } true
+                wrap_val { eexpr = TBinop(op, e1, e2); etype = get e_t; epos = e.epos } (get e_t) true
               else
                 { e with eexpr = TBinop(op, e1, e2) }
           )
@@ -8445,6 +8526,7 @@ struct
           { expr with eexpr = TSwitch(cond, List.map (fun (el, e) -> (el, handle_case (process_expr e))) el_e_l, None) }, Normal
         | TSwitch(cond, el_e_l, Some def) ->
           let def, k = process_expr def in
+          let def = handle_case (def, k) in
           let k = ref k in
           let ret = { expr with eexpr = TSwitch(cond, List.map (fun (el, e) -> 
             let e, ek = process_expr e in
@@ -8456,6 +8538,7 @@ struct
           { expr with eexpr = TMatch(cond, ep, List.map (fun (il, vopt, e) -> (il, vopt, handle_case (process_expr e))) il_vopt_e_l, None) }, Normal
         | TMatch(cond, ep, il_vopt_e_l, Some def) ->
           let def, k = process_expr def in
+          let def = handle_case (def, k) in
           let k = ref k in
           let ret = { expr with eexpr = TMatch(cond, ep, List.map (fun (il, vopt, e) -> 
             let e, ek = process_expr e in
