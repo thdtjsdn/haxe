@@ -36,6 +36,11 @@ let is_cs_basic_type t =
     | TEnum(e, _) when not (has_meta ":$class" e.e_meta) -> true
     | TInst(cl, _) when has_meta ":struct" cl.cl_meta -> true
     | _ -> false
+
+let is_tparam t = 
+  match follow t with
+    | TInst( { cl_kind = KTypeParameter }, [] ) -> true
+    | _ -> false
     
 let rec is_int_float t =
   match follow t with
@@ -97,7 +102,7 @@ struct
 
   let name = "csharp_specific"
   
-  let priority = solve_deps name [DBefore ExpressionUnwrap.priority; DBefore ClassInstance.priority]
+  let priority = solve_deps name [DBefore ExpressionUnwrap.priority; DBefore ClassInstance.priority; DAfter TryCatchWrapper.priority]
   
   let get_cl_from_t t =
     match follow t with
@@ -115,6 +120,14 @@ struct
     let block = ref [] in
     let is_string t = match follow t with | TInst({ cl_path = ([], "String") }, []) -> true | _ -> false in
     
+    let clstring = match basic.tstring with | TInst(cl,_) -> cl | _ -> assert false in
+    
+    let is_struct t = (* not basic type *)
+      match follow t with
+        | TInst(cl, _) when has_meta ":struct" cl.cl_meta -> true
+        | _ -> false
+    in
+    
     let rec run e =
       match e.eexpr with 
         | TBlock bl ->
@@ -127,8 +140,8 @@ struct
           { e with eexpr = TBlock(ret) }
         (* Std.is() *)
         | TCall(
-            { eexpr = TField( { eexpr = TTypeExpr ( TClassDecl ({ cl_path = ([], "Std") }) ) }, "is") },
-            [obj; { eexpr = TTypeExpr(md) }]
+            { eexpr = TField( { eexpr = TTypeExpr ( TClassDecl { cl_path = ([], "Std") } ) }, "is") },
+            [ obj; { eexpr = TTypeExpr(md) }]
           ) ->
           let mk_is obj md =
             { e with eexpr = TCall( { eexpr = TLocal is_var; etype = t_dynamic; epos = e.epos }, [ 
@@ -252,6 +265,28 @@ struct
           in
           
           ret
+        
+        | TBinop( (Ast.OpNotEq as op), e1, e2)
+        | TBinop( (Ast.OpEq as op), e1, e2) when is_string e1.etype || is_string e2.etype ->
+          let mk_ret e = match op with | Ast.OpNotEq -> { e with eexpr = TUnop(Ast.Not, Ast.Prefix, e) } | _ -> e in
+          mk_ret { e with 
+            eexpr = TCall({
+              eexpr = TField(mk_classtype_access clstring e.epos, "Equals");
+              etype = TFun(["obj1",false,basic.tstring; "obj2",false,basic.tstring], basic.tbool);
+              epos = e1.epos
+            }, [ run e1; run e2 ])
+          }
+        
+        | TBinop( (Ast.OpNotEq as op), e1, e2)
+        | TBinop( (Ast.OpEq as op), e1, e2) when is_struct e1.etype || is_struct e2.etype ->
+          let mk_ret e = match op with | Ast.OpNotEq -> { e with eexpr = TUnop(Ast.Not, Ast.Prefix, e) } | _ -> e in
+          mk_ret { e with 
+            eexpr = TCall({
+              eexpr = TField(run e1, "Equals");
+              etype = TFun(["obj1",false,t_dynamic;], basic.tbool);
+              epos = e1.epos
+            }, [ run e2 ])
+          }
         
         | _ -> Type.map_expr run e
     in
@@ -416,18 +451,7 @@ let configure gen =
   
   let runtime_cl = get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Runtime")) in
   
-  let rec change_ns ns = match ns with
-    | "cs" :: "native" :: tl -> "System" :: (change_ns tl)
-    | _ -> List.map (fun s ->
-      let ch = String.get s 0 in
-			let ch = if Char.uppercase ch <> ch then
-					Char.uppercase ch
-				else
-					Char.lowercase ch
-			in
-      (Char.escaped ch) ^ (String.sub s 1 ((String.length s) - 1))
-    ) ns 
-  in
+  let change_ns ns = ns in
   
   let change_clname n = n in
   
@@ -542,13 +566,13 @@ let configure gen =
       | TInst ({ cl_kind = KTypeParameter; cl_path=p }, []) -> snd p
       | TMono r -> (match !r with | None -> "object" | Some t -> t_s (run_follow gen t))
       | TInst ({ cl_path = [], "String" }, []) -> "string"
-      | TInst ({ cl_path = [], "Class" }, _) | TInst ({ cl_path = [], "Enum" }, _) -> "Haxe.Lang.Class"
+      | TInst ({ cl_path = [], "Class" }, _) | TInst ({ cl_path = [], "Enum" }, _) -> "haxe.lang.Class"
       | TEnum (({e_path = p;} as e), params) -> (path_param_s (TEnumDecl e) p params)
       | TInst (({cl_path = p;} as cl), params) -> (path_param_s (TClassDecl cl) p params)
       | TType (({t_path = p;} as t), params) -> (path_param_s (TTypeDecl t) p params)
       | TAnon (anon) ->
         (match !(anon.a_status) with
-          | Statics _ | EnumStatics _ -> "Haxe.Lang.Class"
+          | Statics _ | EnumStatics _ -> "haxe.lang.Class"
           | _ -> "object")
       | TDynamic _ -> "object"
       (* No Lazy type nor Function type made. That's because function types will be at this point be converted into other types *)
@@ -935,7 +959,7 @@ let configure gen =
         let ret_type, args = match cf.cf_type with | TFun (strbtl, t) -> (t, strbtl) | _ -> assert false in
         
         (* public static void funcName *)
-        print w "%s %s%s %s %s" (visibility) v_n (String.concat " " modifiers) (if is_new then "" else rett_s (run_follow gen ret_type)) (change_field name);
+        print w "%s %s %s %s %s" (visibility) v_n (String.concat " " modifiers) (if is_new then "" else rett_s (run_follow gen ret_type)) (change_field name);
         let params, params_ext = get_string_params cf.cf_params in
         (* <T>(string arg1, object arg2) with T : object *)
         print w "%s(%s)%s" (params) (String.concat ", " (List.map (fun (name, _, t) -> sprintf "%s %s" (t_s (run_follow gen t)) (change_id name)) args)) (params_ext);
@@ -1102,7 +1126,7 @@ let configure gen =
     let clt, access, modifiers = get_class_modifiers cl.cl_meta (if cl.cl_interface then "interface" else "class") "public" [] in
     let is_final = clt = "struct" || has_meta ":final" cl.cl_meta in
     
-    print w "%s %s%s %s" access (String.concat " " modifiers) clt (change_clname (snd cl.cl_path));
+    print w "%s %s %s %s" access (String.concat " " modifiers) clt (change_clname (snd cl.cl_path));
     (* type parameters *)
     let params, params_ext = get_string_params cl.cl_types in
     let extends_implements = (match cl.cl_super with | None -> [] | Some (cl,p) -> [path_param_s (TClassDecl cl) cl.cl_path p]) @ (List.map (fun (cl,p) -> path_param_s (TClassDecl cl) cl.cl_path p) cl.cl_implements) in
@@ -1256,6 +1280,7 @@ let configure gen =
         epos = e.epos
       }
     )
+    true
   );
   
   IteratorsInterface.configure gen (fun e -> e);
@@ -1411,11 +1436,20 @@ let configure gen =
     | _ -> false
   in
   
+  let should_handle_opeq t = 
+    match real_type t with
+      | TDynamic _ | TAnon _ | TMono _
+      | TInst( { cl_kind = KTypeParameter }, _ )
+      | TInst( { cl_path = ([], "String") }, [] )
+      | TInst( { cl_path = (["haxe";"lang"], "Null") }, _ ) -> true
+      | _ -> false
+  in
+  
   DynamicOperators.configure gen 
     (DynamicOperators.abstract_implementation gen (fun e -> match e.eexpr with
       | TBinop (Ast.OpEq, e1, e2)
-      | TBinop (Ast.OpAdd, e1, e2)
-      | TBinop (Ast.OpNotEq, e1, e2) -> is_dynamic e1.etype or is_dynamic e2.etype or is_type_param e1.etype or is_type_param e2.etype
+      | TBinop (Ast.OpNotEq, e1, e2) -> should_handle_opeq e1.etype or should_handle_opeq e2.etype
+      | TBinop (Ast.OpAdd, e1, e2) -> is_dynamic e1.etype or is_dynamic e2.etype or is_type_param e1.etype or is_type_param e2.etype
       | TBinop (Ast.OpLt, e1, e2)
       | TBinop (Ast.OpLte, e1, e2)
       | TBinop (Ast.OpGte, e1, e2)
@@ -1429,19 +1463,10 @@ let configure gen =
       if is_null e1 || is_null e2 then 
         { e1 with eexpr = TBinop(Ast.OpEq, e1, e2); etype = basic.tbool }
       else begin
-        let is_ref = match follow e1.etype, follow e2.etype with
+        let is_basic = is_cs_basic_type (follow e1.etype) || is_cs_basic_type (follow e2.etype) in
+        let is_ref = if is_basic then false else match follow e1.etype, follow e2.etype with
           | TDynamic _, _
           | _, TDynamic _
-          | TInst({ cl_path = ([], "Float") },[]), _
-          | TInst( { cl_path = (["haxe"], "Int32") }, [] ), _
-          | TInst( { cl_path = (["haxe"], "Int64") }, [] ), _
-          | TInst({ cl_path = ([], "Int") },[]), _
-          | TEnum({ e_path = ([], "Bool") },[]), _
-          | _, TInst({ cl_path = ([], "Float") },[])
-          | _, TInst({ cl_path = ([], "Int") },[]) 
-          | _, TInst( { cl_path = (["haxe"], "Int32") }, [] )
-          | _, TInst( { cl_path = (["haxe"], "Int64") }, [] )
-          | _, TEnum({ e_path = ([], "Bool") },[]) 
           | TInst( { cl_kind = KTypeParameter }, [] ), _
           | _, TInst( { cl_kind = KTypeParameter }, [] ) -> false
           | _, _ -> true
@@ -1475,7 +1500,7 @@ let configure gen =
   
   FilterClosures.configure gen (FilterClosures.traverse gen (fun e1 s -> true) closure_func);
     
-  let base_exception = get_cl (get_type gen (["cs"; "native"], "Exception")) in
+  let base_exception = get_cl (get_type gen (["System"], "Exception")) in
   let base_exception_t = TInst(base_exception, []) in
   
   let hx_exception = get_cl (get_type gen (["haxe";"lang"], "HaxeException")) in
@@ -1565,6 +1590,8 @@ let configure gen =
       { eexpr = TCall( mk_local goto_special e_break.epos, [ mk_int gen n e_break.epos ] ); etype = t_dynamic; epos = e_break.epos }
     )
   );
+  
+  DefaultArguments.configure gen (DefaultArguments.traverse gen);
   
   CSharpSpecificSynf.configure gen (CSharpSpecificSynf.traverse gen runtime_cl);
   

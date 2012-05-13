@@ -370,8 +370,8 @@ let check_overriding ctx c p () =
 				let p = (match f.cf_expr with None -> p | Some e -> e.epos) in
 				if not (List.mem i c.cl_overrides) then
 					display_error ctx ("Field " ^ i ^ " should be declared with 'override' since it is inherited from superclass") p
-				else if f.cf_public <> f2.cf_public then
-					display_error ctx ("Field " ^ i ^ " has different visibility (public/private) than superclass one") p
+				else if not f.cf_public && f2.cf_public then
+					display_error ctx ("Field " ^ i ^ " has less visibility (public/private) than superclass one") p
 				else (match f.cf_kind, f2.cf_kind with
 				| _, Method MethInline ->
 					display_error ctx ("Field " ^ i ^ " is inlined and cannot be overridden") p
@@ -571,12 +571,16 @@ let type_function ctx args ret fmode f p =
 		add_local ctx n t, c
 	) args in
 	let old_ret = ctx.ret in
+	let old_ret_exprs = ctx.ret_exprs in
 	let old_fun = ctx.curfun in
 	let old_opened = ctx.opened in
 	ctx.curfun <- fmode;
 	ctx.ret <- ret;
+	ctx.ret_exprs <- [];
 	ctx.opened <- [];
 	let e = type_expr ctx (match f.f_expr with None -> error "Function body required" p | Some e -> e) false in
+	let t = unify_min ctx ctx.ret_exprs in
+	unify ctx t ctx.ret e.epos;
 	let rec loop e =
 		match e.eexpr with
 		| TReturn (Some _) -> raise Exit
@@ -617,6 +621,7 @@ let type_function ctx args ret fmode f p =
 	in
 	List.iter (fun r -> r := Closed) ctx.opened;
 	ctx.ret <- old_ret;
+	ctx.ret_exprs <- old_ret_exprs;
 	ctx.curfun <- old_fun;
 	ctx.opened <- old_opened;
 	e , fargs
@@ -918,9 +923,14 @@ let init_class ctx c p herits fields =
 							let e = type_static_var ctx t e p in
 							let e = (if inline then 
 								let e = ctx.g.do_optimize ctx e in
-								(match e.eexpr with
-								| TConst _ -> ()
-								| _ -> display_error ctx "Inline variable must be a constant value" p);
+								let rec is_const e =
+									match e.eexpr with
+									| TConst _ -> true
+									| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod),e1,e2) -> is_const e1 && is_const e2
+									| TParenthesis e -> is_const e
+									| _ -> false
+								in
+								if not (is_const e) then display_error ctx "Inline variable must be a constant value" p;
 								e
 							else e) in
 							cf.cf_expr <- Some e;
@@ -1288,6 +1298,7 @@ let type_module ctx m file tdecls loadp =
 		curclass = ctx.curclass;
 		tthis = ctx.tthis;
 		ret = ctx.ret;
+		ret_exprs = [];
 		current = m;
 		locals = PMap.empty;
 		local_types = ctx.g.std.m_types @ m.m_types;

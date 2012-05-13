@@ -1,5 +1,6 @@
 package unit;
 import unit.MyEnum;
+import unit.MyClass;
 
 class TestType extends Test {
 
@@ -10,6 +11,12 @@ class TestType extends Test {
 		return s;
 		#end
 	}
+	
+	@:macro static function typedAs(actual:haxe.macro.Expr, expected:haxe.macro.Expr) {
+		var tExpected = haxe.macro.Context.typeof(expected);
+		var tActual = haxe.macro.Context.typeof(actual);
+		return haxe.macro.Context.parse("{Test.count++; eq('" +Std.string(tActual) + "', '" +Std.string(tExpected) + "');}", haxe.macro.Context.currentPos());
+	}	
 
 	public function testType() {
 		var name = u("unit")+"."+u("MyClass");
@@ -74,4 +81,112 @@ class TestType extends Test {
 		eq( Type.allEnums(MyEnum).join("#"), "A#B" );
 	}
 	
+	function testWiderVisibility() {
+		var c = new MyClass.MyChild1();
+		eq(12, c.a());
+	}
+	
+	function testUnifyMin() {
+		#if !macro
+
+		// array
+		
+		var ti1:Array<I1>;
+		var tbase:Array<Base>;
+		var tpbase:Array<PClassBase<Float>>;
+		#if (flash9 || cpp)
+		var tnullbool:Array<Null<Bool>>;
+		var tnullbase:Array<Null<Base>>;
+		#else
+		var tnullbool:Array<Bool>;
+		var tnullbase:Array<Base>;
+		#end
+		var tchild1:Array<Child1>;
+		var ts:Array<{s:String}>;
+		
+		typedAs([new Child1(), new Child2()], tbase);
+		typedAs([new Child1(), new Child2(), new Base()], tbase);
+		typedAs([new Child1(), new Child2_1(), new Base()], tbase);	
+		typedAs([new Child2(), new Unrelated()], ti1);
+		typedAs([new Child2_1(), new Unrelated()], ti1);
+
+		typedAs([new ClassI2(), new Child2()], ti1);
+		typedAs([new CI1(), new CI2()], tbase);
+		typedAs([new CII1(), new CII2()], tbase);
+		
+		typedAs([new PClass1(), new PClass2(2.0)], tpbase);
+		
+		typedAs([null, false], tnullbool);
+		typedAs([false, null], tnullbool);
+		typedAs([null, new Base()], tnullbase);
+		//typedAs([new Base(), null], tnullbase); // TODO: this fails on flash9 and cpp
+		typedAs([new Base()], tbase);
+		typedAs([new Base(), new Child1()], tbase);
+		typedAs([new Child1(), new Base()], tbase);
+		typedAs([new Child1(), new Child1()], tchild1);
+		typedAs([ { s:"foo" }, new Unrelated()], ts);
+		typedAs([new Unrelated(), { s:"foo" } ], ts);
+
+		// if
+		
+		var tbase:Base;
+		var ti1:I1;
+		#if (flash9 || cpp)
+		var tnullbool:Null<Bool>;
+		#else
+		var tnullbool:Bool;
+		#end
+		var ts: { s:String };
+		
+		typedAs(if (false) new Child1(); else new Child2(), tbase);
+		typedAs(
+			if (false) new Child1();
+			else if (true) new Child2();
+			else new Base(), tbase);
+		typedAs(
+			if (false) new Child1();
+			else if (true) new Child2_1();
+			else new Base(), tbase);
+		typedAs(if (false) new Child2(); else new Unrelated(), ti1);
+		typedAs(if (false) new Child2_1(); else new Unrelated(), ti1);
+		
+		typedAs(if (false) null; else false, tnullbool);
+		typedAs(if (false) true; else null, tnullbool);
+		typedAs(if (false) new Unrelated(); else {s:"foo"}, ts);
+		typedAs(if (false) { s:"foo" }; else new Unrelated(), ts);
+		
+		//switch
+		
+		typedAs(switch(false) { case true: new Child1(); case false: new Child2(); }, tbase);
+		typedAs(switch(1) { case 0: new Child1(); case 1: new Child2(); case 2: new Base(); }, tbase);
+		typedAs(switch(1) { case 0: new Child1(); case 1: new Child2_1(); default: new Base(); }, tbase);
+		typedAs(switch(false) { case true: new Child2(); case false: new Unrelated(); }, ti1);
+		typedAs(switch(false) { case true: new Child2_1(); case false: new Unrelated(); }, ti1);
+		
+		typedAs(switch(false) { case true: null; default: false; }, tnullbool);
+		typedAs(switch(false) { case true: true; default: null; }, tnullbool);
+		typedAs(switch(false) { case true: new Unrelated(); default: {s:"foo"}; }, ts);
+		typedAs(switch(false) { case true: { s:"foo" }; default: new Unrelated(); }, ts);
+		
+		// return
+		
+		typedAs(function() { return new Child1(); return new Child2(); } (), tbase);
+		typedAs(function() { return new Child1(); return new Child2(); return new Base(); } (), tbase);
+		typedAs(function() { return new Child1(); return new Child2_1(); return new Base(); } (), tbase);
+		typedAs(function() { return new Child2(); return new Unrelated(); } (), ti1);
+		typedAs(function() { return new Child2_1(); return new Unrelated(); } (), ti1);
+		
+		typedAs(function() { return null; return false; } (), tnullbool);
+		typedAs(function() { return true; return null; } (), tnullbool);
+		typedAs(function() { return new Unrelated(); return {s:"foo"}; } (), ts);
+		typedAs(function() { return { s:"foo" }; return new Unrelated(); } (), ts);
+		
+		#if flash9
+		typedAs(function() { return 0; var v:UInt = 0; return v; } (), 1);
+		#end
+		
+		//typedAs(function() { return null; return untyped false; } (), tnullbool);
+		#end
+		
+	}
 }

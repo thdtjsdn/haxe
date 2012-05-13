@@ -380,6 +380,9 @@ let field_access ctx mode f t e p =
 			| TInst (c,_) when is_parent c ctx.curclass -> normal()
 			| TAnon a ->
 				(match !(a.a_status) with
+				| Opened when mode = MSet ->
+					f.cf_kind <- Var { v with v_write = AccNormal };
+					normal()
 				| Statics c2 when ctx.curclass == c2 -> normal()
 				| _ -> if ctx.untyped then normal() else AKNo f.cf_name)
 			| _ ->
@@ -1042,27 +1045,14 @@ and type_switch ctx e cases def need_val p =
 		el, e2
 	) cases in
 	ctx.local_types <- old;
-	let t = ref (mk_mono()) in
+	let el = ref [] in
 	let type_case_code e =
 		let e = (match e with
 			| (EBlock [],p) when need_val -> (EConst (Ident "null"),p)
 			| _ -> e
 		) in
 		let e = type_expr ~need_val ctx e in
-		if need_val then begin
-			try
-				(match e.eexpr with
-				| TBlock [{ eexpr = TConst TNull }] -> t := ctx.t.tnull !t;
-				| _ -> ());
-				unify_raise ctx e.etype (!t) e.epos;
-				if is_null e.etype then t := ctx.t.tnull !t;
-			with Error (Unify _,_) -> try
-				unify_raise ctx (!t) e.etype e.epos;
-				t := if is_null !t then ctx.t.tnull e.etype else e.etype;
-			with Error (Unify _,_) ->
-				(* will display the error *)
-				unify ctx e.etype (!t) e.epos;
-		end;
+		el := !el @ [e];
 		e
 	in
 	let def = (match def with
@@ -1132,7 +1122,8 @@ and type_switch ctx e cases def need_val p =
 			| [] -> ()
 			| _ -> display_error ctx ("Some constructors are not matched : " ^ String.concat "," l) p
 		);
-		mk (TMatch (eval,(enum,enparams),List.map indexes cases,def)) (!t) p
+		let t = if not need_val then ctx.t.tvoid else unify_min_raise ctx !el in
+		mk (TMatch (eval,(enum,enparams),List.map indexes cases,def)) t p
 	| _ ->
 		let consts = Hashtbl.create 0 in
 		let exprs (el,e) =
@@ -1151,7 +1142,8 @@ and type_switch ctx e cases def need_val p =
 			el, e
 		in
 		let cases = List.map exprs cases in
-		mk (TSwitch (eval,cases,def)) (!t) p
+		let t = if not need_val then ctx.t.tvoid else unify_min_raise ctx !el in
+		mk (TSwitch (eval,cases,def)) t p
 
 and type_ident_noerr ctx i is_type p mode =
 	try
@@ -1372,6 +1364,17 @@ and type_access ctx e p mode =
 	| _ ->
 		AKExpr (type_expr ctx (e,p))
 
+and type_exprs_unified ctx ?(need_val=true) el =
+	match el with
+	| [] -> [], mk_mono()
+	| [e] ->
+		let te = type_expr ctx ~need_val e in
+		[te], te.etype
+	| _ ->
+		let tl = List.map (type_expr ctx ~need_val) el in
+		let t = try unify_min_raise ctx tl with _ -> t_dynamic in
+		tl, t
+
 and type_expr ctx ?(need_val=true) (e,p) =
 	match e with
 	| EField ((EConst (String s),p),"code") ->
@@ -1436,26 +1439,8 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		ctx.opened <- x :: ctx.opened;
 		mk (TObjectDecl (List.rev fields)) (TAnon { a_fields = types; a_status = x }) p
 	| EArrayDecl el ->
-		let t = ref (mk_mono()) in
-		let is_null = ref false in
-		let el = List.map (fun e ->
-			let e = type_expr ctx e in
-			(match e.eexpr with
-			| TConst TNull when not !is_null ->
-				is_null := true;
-				t := ctx.t.tnull !t;
-			| _ -> ());
-			if e.etype == t_dynamic then t := t_dynamic;
-			(try
-				unify_raise ctx e.etype (!t) e.epos;
-			with Error (Unify _,_) -> try
-				unify_raise ctx (!t) e.etype e.epos;
-				t := e.etype;
-			with Error (Unify _,_) ->
-				t := t_dynamic);
-			e
-		) el in
-		mk (TArrayDecl el) (ctx.t.tarray !t) p
+		let tl, t = type_exprs_unified ctx el in
+		mk (TArrayDecl tl) (ctx.t.tarray t) p
 	| EVars vl ->
 		let vl = List.map (fun (v,t,e) ->
 			try
@@ -1534,18 +1519,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 				mk (TIf (e,e1,None)) ctx.t.tvoid p
 		| Some e2 ->
 			let e2 = type_expr ctx ~need_val e2 in
-			let t = if not need_val then ctx.t.tvoid else (try
-				(match e1.eexpr, e2.eexpr with
-				| _ , TConst TNull -> ctx.t.tnull e1.etype
-				| TConst TNull, _ -> ctx.t.tnull e2.etype
-				| _  ->
-					unify_raise ctx e1.etype e2.etype p;
-					if is_null e1.etype then ctx.t.tnull e2.etype else e2.etype)
-			with
-				Error (Unify _,_) ->
-					unify ctx e2.etype e1.etype p;
-					if is_null e2.etype then ctx.t.tnull e1.etype else e1.etype
-			) in
+			let t = if not need_val then ctx.t.tvoid else unify_min_raise ctx [e1; e2] in
 			mk (TIf (e,e1,Some e2)) t p)
 	| EWhile (cond,e,NormalWhile) ->
 		let old_loop = ctx.in_loop in
@@ -1573,7 +1547,11 @@ and type_expr ctx ?(need_val=true) (e,p) =
 				None , v
 			| Some e ->
 				let e = type_expr ctx e in
-				unify ctx e.etype ctx.ret e.epos;
+				(match ctx.ret with
+				| TMono _ when not ctx.untyped ->
+					ctx.ret_exprs <- e :: ctx.ret_exprs
+				| _ ->
+					unify ctx e.etype ctx.ret e.epos);
 				Some e , e.etype
 		) in
 		mk (TReturn e) t_dynamic p
@@ -2417,6 +2395,9 @@ let make_macro_api ctx p =
 				else
 					Some (TInst (ctx.curclass,[]))
 		);
+		Interp.get_local_method = (fun() ->
+			ctx.curmethod;
+		);
 		Interp.get_build_fields = (fun() ->
 			match ctx.g.get_build_infos() with
 			| None -> Interp.VNull
@@ -2687,6 +2668,7 @@ let rec create com =
 		in_display = false;
 		in_macro = Common.defined com "macro";
 		ret = mk_mono();
+		ret_exprs = [];
 		locals = PMap.empty;
 		local_types = [];
 		local_using = [];

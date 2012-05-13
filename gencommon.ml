@@ -1488,12 +1488,20 @@ struct
               match is_super_hxgen cl with
                 | true ->
                   (* can call super empty *)
-                  let ret = { 
+                  let ret_empty = { 
                     eexpr = TCall({ eexpr = TConst(TSuper); etype = me.v_type; epos = cl.cl_pos }, [ empty_ctor_expr ]);
                     etype = basic.tvoid;
                     epos = cl.cl_pos
                   } in
-                  ret, ret
+                  
+                  let ret = match last_static_ctor, !super_call with
+                    | None, Some super ->
+                      (* it has an empty constructor, but we cannot call an out of placed super *)
+                      super
+                    | _ -> ret_empty
+                  in
+                  
+                  ret, ret_empty
                 | false ->
                   match prev_ctor cl with
                     | None ->
@@ -8175,7 +8183,7 @@ struct
         Some( TType(tdef, [ strip_off_nullable of_t ]) )
       | _ -> None
   
-  let traverse gen unwrap_null wrap_val null_to_dynamic =
+  let traverse gen unwrap_null wrap_val null_to_dynamic handle_opeq =
     let handle_unwrap to_t e =
       match gen.gfollow#run_f to_t with 
         | TDynamic _ | TMono _ | TAnon _ ->
@@ -8224,6 +8232,8 @@ struct
             | Ast.OpAssign
             | Ast.OpAssignOp _ ->
               Type.map_expr run e (* casts are already dealt with normal CastDetection module *)
+            | Ast.OpEq | Ast.OpNotEq when not handle_opeq ->
+              Type.map_expr run e
             | _ ->
               let e1 = if is_some e1_t then 
                 handle_unwrap (get e1_t) (run e1)
@@ -8599,6 +8609,10 @@ struct
       | Some const ->
         let basic = gen.gcon.basic in
         let nullable_var = mk_temp gen var.v_name (basic.tnull var.v_type) in
+        let const_t = match const with 
+          | TString _ -> basic.tstring | TInt _ -> basic.tint | TFloat _ -> basic.tfloat 
+          | TNull _ -> var.v_type | TBool _ -> basic.tbool | _ -> assert false 
+        in
         (* var v = (temp_var == null) ? const : cast temp_var; *)
         block := 
         {
@@ -8606,7 +8620,7 @@ struct
           {
             eexpr = TIf(
               { eexpr = TBinop(Ast.OpEq, mk_local nullable_var pos, null nullable_var.v_type pos); etype = basic.tbool; epos = pos },
-              { eexpr = TConst(const); etype = var.v_type; epos = pos },
+              mk_cast var.v_type { eexpr = TConst(const); etype = const_t; epos = pos },
               Some(mk_cast var.v_type (mk_local nullable_var pos))
             );
             etype = var.v_type;
@@ -8756,16 +8770,11 @@ struct
     let basic = gen.gcon.basic in
     let rec run e =
       match e.eexpr with 
-        | TBinop((Ast.OpDiv as op), e1, e2)
-        | TBinop(((Ast.OpAssignOp (Ast.OpDiv)) as op), e1, e2) when is_int e1.etype && is_int e2.etype ->
+        | TBinop((Ast.OpDiv as op), e1, e2) when is_int e1.etype && is_int e2.etype ->
           { e with eexpr = TBinop(op, mk_cast basic.tfloat (run e1), run e2) }
         | TCall(
             { eexpr = TField( { eexpr = TTypeExpr ( TClassDecl ({ cl_path = ([], "Std") }) ) }, "int") },
             [ ({ eexpr = TBinop((Ast.OpDiv as op), e1, e2) } as ebinop ) ]
-          )
-        | TCall(
-            { eexpr = TField( { eexpr = TTypeExpr ( TClassDecl ({ cl_path = ([], "Std") }) ) }, "int") },
-            [ ({ eexpr = TBinop(((Ast.OpAssignOp (Ast.OpDiv)) as op), e1, e2) } as ebinop ) ]
           ) when catch_int_div && is_int e1.etype && is_int e2.etype ->
           { ebinop with eexpr = TBinop(op, run e1, run e2); etype = basic.tint }
         | TCast( ({ eexpr = TBinop((Ast.OpDiv as op), e1, e2) } as ebinop ), _ )
