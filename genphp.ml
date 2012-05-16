@@ -255,7 +255,7 @@ haxe reserved words that match php ones: break, case, class, continue, default, 
 	| "include_once" | "isset" | "list" | "namespace" | "print" | "require" | "require_once"
 	| "unset" | "use" | "__function__" | "__class__" | "__method__" | "final"
 	| "php_user_filter" | "protected" | "abstract" | "__set" | "__get" | "__call"
-	| "clone" -> suf ^ n
+	| "clone" | "instanceof" -> suf ^ n
 	| _ -> n
 
 let s_ident_local n =
@@ -1948,7 +1948,8 @@ let generate_class ctx c =
 	| Some (csup,_) ->
 		requires_constructor := false;
 		print ctx "extends %s " (s_path ctx csup.cl_path csup.cl_extern c.cl_pos));
-	(match c.cl_implements with
+	let implements = ExtList.List.unique ~cmp:(fun a b -> (fst a).cl_path = (fst b).cl_path) c.cl_implements in
+	(match implements with
 	| [] -> ()
 	| l ->
 		spr ctx (if c.cl_interface then "extends " else "implements ");

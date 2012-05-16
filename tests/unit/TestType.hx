@@ -84,6 +84,10 @@ class TestType extends Test {
 	function testWiderVisibility() {
 		var c = new MyClass.MyChild1();
 		eq(12, c.a());
+		
+		var mc2 = new MyChild2();
+		eq(21, mc2.test1(new MyChild1()));
+		eq(19, mc2.test2(new MyChild1()));
 	}
 	
 	function testUnifyMin() {
@@ -168,25 +172,92 @@ class TestType extends Test {
 		typedAs(switch(false) { case true: new Unrelated(); default: {s:"foo"}; }, ts);
 		typedAs(switch(false) { case true: { s:"foo" }; default: new Unrelated(); }, ts);
 		
-		// return
-		
-		typedAs(function() { return new Child1(); return new Child2(); } (), tbase);
-		typedAs(function() { return new Child1(); return new Child2(); return new Base(); } (), tbase);
-		typedAs(function() { return new Child1(); return new Child2_1(); return new Base(); } (), tbase);
-		typedAs(function() { return new Child2(); return new Unrelated(); } (), ti1);
-		typedAs(function() { return new Child2_1(); return new Unrelated(); } (), ti1);
-		
-		typedAs(function() { return null; return false; } (), tnullbool);
-		typedAs(function() { return true; return null; } (), tnullbool);
-		typedAs(function() { return new Unrelated(); return {s:"foo"}; } (), ts);
-		typedAs(function() { return { s:"foo" }; return new Unrelated(); } (), ts);
-		
 		#if flash9
 		typedAs(function() { return 0; var v:UInt = 0; return v; } (), 1);
 		#end
+
+		#end
+	}
+
+	function testCallback()
+	{
 		
-		//typedAs(function() { return null; return untyped false; } (), tnullbool);
+		var func = function(a:Int, b:String, c:Float) return a;
+
+		#if !macro
+		var tstringfloat = function(b:String, c:Float) return 0;
+		var tfloat = function(c:Float) return 0;
+		var tvoid = function() return 0;
+		var tintstring = function(a:Int, b:String) return 0;
+		var tintfloat = function(a:Int, c:Float) return 0;
+		var tint = function(a:Int) return 0;	
+		var tstring = function(b:String) return 0;	
+
+		// all missing
+		
+		typedAs(callback(func), func);
+		typedAs(callback(func, _), func);
+		typedAs(callback(func, _, _), func);
+		typedAs(callback(func, _, _, _), func);
+
+		// all given
+		
+		typedAs(callback(func, 22, "2", 13), tvoid);
+
+		// last missing
+		
+		typedAs(callback(func, 22, "2"), tfloat);
+		typedAs(callback(func, 22, "2", _), tfloat);
+		
+		// first given
+		
+		typedAs(callback(func, 22), tstringfloat);
+		typedAs(callback(func, 22, _), tstringfloat);
+		typedAs(callback(func, 22, _, _), tstringfloat);
+		
+		// mixed
+		
+		typedAs(callback(func, _, _, 12), tintstring);
+		typedAs(callback(func, _, "22", _), tintfloat);
+		typedAs(callback(func, _, "22", 12), tint);
+		typedAs(callback(func, 12, _, 12), tstring);
+		
 		#end
 		
+		// values
+		
+		eq(1, callback(func)(1, "2", 3));
+		eq(2, callback(func, 2)("2", 3));
+		eq(2, callback(func, 2, "3")(3));
+		eq(2, callback(func, 2, "3", 4)());
+		
+		eq(1, callback(func, _, "2", 3)(1));
+		eq(1, callback(func, _, "2")(1, 3));
+		eq(1, callback(func, _)(1, "2", 3));
+		
+		eq(1, callback(func, _, "2", _)(1, 2));
+		
+		eq(1, callback(callback(func), _, "2", 3)(1));
+		eq(1, callback(callback(func, 1), "2", 3)());
+		eq(1, callback(callback(func, 1, _), "2")(3));
+		eq(1, callback(callback(func, _, "2"), 1)(3));
+		
+		var a = 5;
+		var b = "foo";
+		var cb = callback(func, a);
+		a = 6;
+		func = function(a,b,c):Int return throw "error";
+		eq(5, cb(b, 0));
+		
+		var optfunc = function(a:Int, b:Int, ?c:Int = 2) return a + b + c;
+		eq(6, callback(optfunc, 1)(3));
+		eq(6, callback(optfunc, 1, 3)());
+		
+		eq(7, callback(optfunc, _, _, _)(1, 2, 4));
+		eq(7, callback(optfunc, _, 2, _)(1, 4));
+		
+		var foo = function ( x : Int, ?p : haxe.PosInfos ) { return "foo" + x; }
+		var f : Void -> String = callback(foo, 0);
+ 		eq("foo0", f());
 	}
 }

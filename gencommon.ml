@@ -5557,8 +5557,6 @@ struct
       rcf_handle_statics = handle_statics;
     }
   
-  let priority = solve_deps name []
-  
   (* 
     methods as a bool option is a little laziness of my part. 
       None means that methods are included with normal fields;
@@ -7367,9 +7365,15 @@ struct
       gen.gmodule_filters#add ~name:name ~priority:(PCustom priority) map
     
     let default_config gen baseclass baseinterface basedynamic =
-      configure gen (default_implementation gen baseclass baseinterface basedynamic)
+      let impl = (default_implementation gen baseclass baseinterface basedynamic) in
+      configure gen impl
     
   end;;
+  
+  (*
+    Priority: must run AFTER UniversalBaseClass
+  *)
+  let priority = solve_deps name [DAfter UniversalBaseClass.priority]
   
   let configure ctx =
     let gen = ctx.rcf_gen in
@@ -8611,7 +8615,7 @@ struct
         let nullable_var = mk_temp gen var.v_name (basic.tnull var.v_type) in
         let const_t = match const with 
           | TString _ -> basic.tstring | TInt _ -> basic.tint | TFloat _ -> basic.tfloat 
-          | TNull _ -> var.v_type | TBool _ -> basic.tbool | _ -> assert false 
+          | TNull -> var.v_type | TBool _ -> basic.tbool | _ -> assert false 
         in
         (* var v = (temp_var == null) ? const : cast temp_var; *)
         block := 

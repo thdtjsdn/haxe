@@ -108,10 +108,86 @@ let classify t =
 	| _ -> KOther
 
 let type_field_rec = ref (fun _ _ _ _ _ -> assert false)
-let type_expr_with_type_rec = ref (fun _ _ _ -> assert false)
+let type_expr_with_type_rec = ref (fun ~unify _ _ _ -> assert false)
 
 (* ---------------------------------------------------------------------- *)
 (* PASS 3 : type expression & check structure *)
+
+let rec base_types t =
+	let tl = ref [] in
+	let rec loop t = (match t with
+	| TInst(cl, params) ->
+		List.iter (fun (ic, ip) ->
+			let t = apply_params cl.cl_types params (TInst (ic,ip)) in
+			loop t
+		) cl.cl_implements;	
+		(match cl.cl_super with None -> () | Some (csup, pl) ->
+			let t = apply_params cl.cl_types params (TInst (csup,pl)) in
+			loop t);
+		tl := t :: !tl;
+	| TType ({ t_path = ([],"Null") },[t]) -> loop t;
+	| TLazy f -> loop (!f())
+	| TMono r -> (match !r with None -> () | Some t -> loop t)
+	| _ -> tl := t :: !tl) in
+	loop t;
+	tl
+
+let unify_min_raise ctx el =
+	match el with
+	| [] -> mk_mono()
+	| [e] -> e.etype
+	| _ ->
+		let rec chk_null e = is_null e.etype ||
+			match e.eexpr with
+			| TConst TNull -> true
+			| TBlock el ->
+				(match List.rev el with
+				| [] -> false
+				| e :: _ -> chk_null e)
+			| TParenthesis e -> chk_null e
+			| _ -> false
+		in
+		let t = ref (mk_mono()) in
+		let is_null = ref false in
+		let has_error = ref false in
+
+		(* First pass: Try normal unification and find out if null is involved. *)
+		List.iter (fun e -> 
+			if not !is_null && chk_null e then begin
+				is_null := true;
+				t := ctx.t.tnull !t
+			end;
+			let et = follow e.etype in
+			(try
+				unify_raise ctx et (!t) e.epos;
+			with Error (Unify _,_) -> try
+				unify_raise ctx (!t) et e.epos;
+				t := et;
+			with Error (Unify _,_) -> has_error := true);
+		) el;
+		if not !has_error then !t else begin
+			(* Second pass: Get all base types (interfaces, super classes and their interfaces) of most general type.
+			   Then for each additional type filter all types that do not unify. *)
+			let common_types = base_types !t in
+			let loop e = 
+				let first_error = ref None in
+				let filter t = (try unify_raise ctx e.etype t e.epos; true
+					with Error (Unify l, p) as err -> if !first_error = None then first_error := Some(err); false)
+				in
+				common_types := List.filter filter !common_types;
+				(match !common_types, !first_error with
+					| [], Some err -> raise err
+					| _ -> ());
+			in
+			List.iter loop (List.tl el);
+			List.hd !common_types
+		end
+
+let unify_min ctx el = 
+	try unify_min_raise ctx el
+	with Error (Unify l,p) ->
+		if not ctx.untyped then display_error ctx (error_msg (Unify l)) p;
+		(List.hd el).etype
 
 let rec unify_call_params ctx name el args r p inline =
 	let next() =
@@ -137,7 +213,7 @@ let rec unify_call_params ctx name el args r p inline =
 		let format_arg = (fun (name,opt,_) -> (if opt then "?" else "") ^ name) in
 		let argstr = "Function " ^ (match name with None -> "" | Some (n,_) -> "'" ^ n ^ "' ") ^ "requires " ^ (if args = [] then "no arguments" else "arguments : " ^ String.concat ", " (List.map format_arg args)) in
 		display_error ctx (txt ^ " arguments\n" ^ argstr) p;
-		List.rev (List.map fst acc), r
+		List.rev (List.map fst acc), (TFun(args,r))
 	in
 	let arg_error ul name opt p =
 		match next() with
@@ -175,9 +251,9 @@ let rec unify_call_params ctx name el args r p inline =
 		match l , l2 with
 		| [] , [] ->
 			if not (inline && ctx.g.doinline) && (match ctx.com.platform with Flash8 | Flash | Js -> true | _ -> false) then
-				List.rev (no_opt acc), r
+				List.rev (no_opt acc), (TFun(args,r))
 			else
-				List.rev (List.map fst acc), r
+				List.rev (List.map fst acc), (TFun(args,r))
 		| [] , (_,false,_) :: _ ->
 			error (List.fold_left (fun acc (_,_,t) -> default_value t :: acc) acc l2) "Not enough"
 		| [] , (name,true,t) :: l ->
@@ -188,8 +264,8 @@ let rec unify_call_params ctx name el args r p inline =
 			| [name,ul] -> arg_error ul name true p
 			| _ -> error acc "Invalid")
 		| ee :: l, (name,opt,t) :: l2 ->
-			let e = (!type_expr_with_type_rec) ctx ee (Some t) in
 			try
+				let e = (!type_expr_with_type_rec) ~unify:unify_raise ctx ee (Some t) in
 				unify_raise ctx e.etype t e.epos;
 				loop ((e,false) :: acc) l l2 skip
 			with
@@ -197,7 +273,7 @@ let rec unify_call_params ctx name el args r p inline =
 					if opt then
 						loop (default_value t :: acc) (ee :: l) l2 ((name,ul) :: skip)
 					else
-						arg_error ul name false e.epos
+						arg_error ul name false (snd ee)
 	in
 	loop [] el args []
 
@@ -288,7 +364,7 @@ let make_call ctx e params t p =
 		let params = List.map (ctx.g.do_optimize ctx) params in
 		(match f.cf_expr with
 		| Some { eexpr = TFunction fd } ->
-			(match Optimizer.type_inline ctx f fd ethis params t p (match cl with Some { cl_extern = true } -> true | _ -> false) with
+			(match Optimizer.type_inline ctx f fd ethis params t p is_extern with
 			| None ->
 				if is_extern then error "Inline could not be done" p;
 				raise Exit
@@ -575,9 +651,10 @@ let rec type_field ctx e i p mode =
 				| Some (c,params) -> loop_dyn c params
 		in
 		(try
+			let rec share_parent csup c = if is_parent csup c then true else match csup.cl_super with None -> false | Some (csup,_) -> share_parent csup c in 
 			let t , f = class_field c i in
 			if e.eexpr = TConst TSuper && (match f.cf_kind with Var _ -> true | _ -> false) && Common.platform ctx.com Flash then error "Cannot access superclass variable for calling : needs to be a proper method" p;
-			if not f.cf_public && not (is_parent c ctx.curclass) && not ctx.untyped then display_error ctx ("Cannot access to private field " ^ i) p;
+			if not f.cf_public && not (share_parent c ctx.curclass) && not ctx.untyped then display_error ctx ("Cannot access to private field " ^ i) p;
 			field_access ctx mode f (apply_params c.cl_types params t) e p
 		with Not_found -> try
 			using_field ctx mode e i p
@@ -653,6 +730,52 @@ let rec type_field ctx e i p mode =
 	| _ ->
 		try using_field ctx mode e i p with Not_found -> no_field()
 
+let type_callback ctx e params p =
+	let e = type_expr ctx e true in
+	let args,ret = match follow e.etype with TFun(args, ret) -> args, ret | _ -> error "First parameter of callback is not a function" p in
+	let vexpr v = mk (TLocal v) v.v_type p in
+	let acount = ref 0 in
+	let alloc_name n =
+		if n = "" || String.length n > 2 then begin
+			incr acount;
+			"a" ^ string_of_int !acount;
+		end else
+			n
+	in
+	let rec loop args params given_args missing_args ordered_args = match args, params with
+		| [], [] -> given_args,missing_args,ordered_args
+		| [], _ -> error "Too many callback arguments" p
+		| (n,o,t) :: args , [] when o ->
+			let a = match ctx.com.platform with Neko | Php -> (ordered_args @ [(mk (TConst TNull) t_dynamic p)]) | _ -> ordered_args in
+			loop args [] given_args missing_args a
+		| (n,o,t) :: args , ([] as params)
+		| (n,o,t) :: args , (EConst(Ident "_"),_) :: params ->
+			let v = alloc_var (alloc_name n) t in
+			loop args params given_args (missing_args @ [v,o,None]) (ordered_args @ [vexpr v])
+		| (n,o,t) :: args , param :: params ->
+			let e = type_expr ctx param true in
+			unify ctx e.etype t p;
+			let v = alloc_var (alloc_name n) t in
+			loop args params (given_args @ [v,o,Some e]) missing_args (ordered_args @ [vexpr v])
+	in
+	let given_args,missing_args,ordered_args = loop args params [] [] [] in
+	let loc = alloc_var "f" e.etype in
+	let given_args = (loc,false,Some e) :: given_args in
+	let fun_args l = List.map (fun (v,o,_) -> v.v_name, o, v.v_type) l in
+	let t_inner = TFun(fun_args missing_args, ret) in
+	let call = make_call ctx (vexpr loc) ordered_args ret p in
+	let func = mk (TFunction {
+		tf_args = List.map (fun (v,_,_) -> v,None) missing_args;
+		tf_type = ret;
+		tf_expr = mk (TReturn (Some call)) ret p;
+	}) t_inner p in
+	let func = mk (TFunction {
+		tf_args = List.map (fun (v,_,_) -> v,None) given_args;
+		tf_type = t_inner;
+		tf_expr = mk (TReturn (Some func)) t_inner p;
+	}) (TFun(fun_args given_args, t_inner)) p in
+	make_call ctx func (List.map (fun (_,_,e) -> (match e with Some e -> e | None -> assert false)) given_args) t_inner p
+
 (*
 	We want to try unifying as an integer and apply side effects.
 	However, in case the value is not a normal Monomorph but one issued
@@ -715,7 +838,7 @@ let rec type_binop ctx op e1 e2 p =
 	match op with
 	| OpAssign ->
 		let e1 = type_access ctx (fst e1) (snd e1) MSet in
-		let e2 = type_expr_with_type ctx e2 (match e1 with AKNo _ | AKInline _ | AKUsing _ | AKMacro _ -> None | AKExpr e | AKField (e,_) | AKSet(e,_,_,_) -> Some e.etype) in
+		let e2 = type_expr_with_type ~unify ctx e2 (match e1 with AKNo _ | AKInline _ | AKUsing _ | AKMacro _ -> None | AKExpr e | AKField (e,_) | AKSet(e,_,_,_) -> Some e.etype) in
 		(match e1 with
 		| AKNo s -> error ("Cannot access field or identifier " ^ s ^ " for writing") p
 		| AKExpr e1 | AKField (e1,_) ->
@@ -1177,7 +1300,7 @@ and type_ident_noerr ctx i is_type p mode =
 			end
 		end
 
-and type_expr_with_type ctx e t =
+and type_expr_with_type ~unify ctx e t =
 	match e with
 	| (EFunction _,_) ->
 		let old = ctx.param_type in
@@ -1219,7 +1342,7 @@ and type_expr_with_type ctx e t =
 					type_expr ctx e
 				| _ ->
 					let el = List.map (fun e ->
-						let e = type_expr_with_type ctx e (Some tp) in
+						let e = type_expr_with_type ~unify ctx e (Some tp) in
 						unify ctx e.etype tp e.epos;
 						e
 					) el in
@@ -1448,7 +1571,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 				let e = (match e with
 					| None -> None
 					| Some e ->
-						let e = type_expr_with_type ctx e (Some t) in
+						let e = type_expr_with_type ~unify ctx e (Some t) in
 						unify ctx e.etype t p;
 						Some e
 				) in
@@ -1547,11 +1670,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 				None , v
 			| Some e ->
 				let e = type_expr ctx e in
-				(match ctx.ret with
-				| TMono _ when not ctx.untyped ->
-					ctx.ret_exprs <- e :: ctx.ret_exprs
-				| _ ->
-					unify ctx e.etype ctx.ret e.epos);
+				unify ctx e.etype ctx.ret e.epos;
 				Some e , e.etype
 		) in
 		mk (TReturn e) t_dynamic p
@@ -1812,39 +1931,7 @@ and type_call ctx e el p =
 		let infos = mk_infos ctx p params in
 		type_expr ctx (ECall ((EField ((EType ((EConst (Ident "haxe"),p),"Log"),p),"trace"),p),[e;EUntyped infos,p]),p)
 	| (EConst (Ident "callback"),p) , e :: params ->
-		let e = type_expr ctx e in
-		let eparams = List.map (type_expr ctx) params in
-		(match follow e.etype with
-		| TFun (args,ret) ->
-			let rec loop args params eargs =
-				match args, params with
-				| _ , [] ->
-					let k = ref 0 in
-					let fun_args l = List.map (fun (v,c) -> v.v_name, c<>None, v.v_type) l in
-					let fun_arg = alloc_var "f" e.etype,None in
-					let first_args = List.map (fun t -> incr k; alloc_var ("a" ^ string_of_int !k) t, None) (List.rev eargs) in
-					let missing_args = List.map (fun (_,opt,t) -> incr k; alloc_var ("a" ^ string_of_int !k) t, (if opt then Some TNull else None)) args in
-					let vexpr (v,_) = mk (TLocal v) v.v_type p in
-					let func = mk (TFunction {
-						tf_args = missing_args;
-						tf_type = ret;
-						tf_expr = mk (TReturn (Some (
-							make_call ctx (vexpr fun_arg) (List.map vexpr (first_args @ missing_args)) ret p
-						))) ret p;
-					}) (TFun (fun_args missing_args,ret)) p in
-					let func = mk (TFunction {
-						tf_args = fun_arg :: first_args;
-						tf_type = func.etype;
-						tf_expr = mk (TReturn (Some func)) e.etype p;
-					}) (TFun (("f", false, e.etype) :: fun_args first_args,func.etype)) p in
-					mk (TCall (func,e :: eparams)) (TFun (fun_args missing_args,ret)) p
-				| [], _ -> error "Too many callback arguments" p
-				| (_,_,t) :: args , e :: params ->
-					unify ctx e.etype t p;
-					loop args params (t :: eargs)
-			in
-			loop args eparams []
-		| _ -> error "First parameter of callback is not a function" p);
+		type_callback ctx e params p
 	| (EConst (Ident "type"),_) , [e] ->
 		let e = type_expr ctx e in
 		ctx.com.warning (s_type (print_context()) e.etype) e.epos;
@@ -1879,11 +1966,11 @@ and type_call ctx e el p =
 		let rec loop acc el =
 			match acc with
 			| AKInline (ethis,f,t) ->
-				let params, tret = (match follow t with
+				let params, tfunc = (match follow t with
 					| TFun (args,r) -> unify_call_params ctx (Some (f.cf_name,f.cf_meta)) el args r p true
 					| _ -> error (s_type (print_context()) t ^ " cannot be called") p
 				) in
-				make_call ctx (mk (TField (ethis,f.cf_name)) t p) params tret p
+				make_call ctx (mk (TField (ethis,f.cf_name)) t p) params (match tfunc with TFun(_,r) -> r | _ -> assert false) p
 			| AKUsing (et,ef,eparam) ->
 				(match et.eexpr with
 				| TField (ec,_) ->
@@ -1892,11 +1979,12 @@ and type_call ctx e el p =
 					| AKMacro _ ->
 						loop acc (Interp.make_ast eparam :: el)
 					| AKExpr _ | AKField _ | AKInline _ ->
-						let params, tret = (match follow et.etype with
+						let params, tfunc = (match follow et.etype with
 							| TFun ( _ :: args,r) -> unify_call_params ctx (Some (ef.cf_name,ef.cf_meta)) el args r p (ef.cf_kind = Method MethInline)
 							| _ -> assert false
 						) in
-						make_call ctx et (eparam::params) tret p
+						let et = {et with etype = tfunc} in
+						make_call ctx et (eparam::params) (match tfunc with TFun(_,r) -> r | _ -> assert false) p
 					| _ -> assert false)
 				| _ -> assert false)
 			| AKMacro (ethis,f) ->
@@ -1925,23 +2013,24 @@ and type_call ctx e el p =
 				ignore(acc_get ctx acc p);
 				assert false
 			| AKExpr e | AKField (e,_) as acc ->
-				let el , t = (match follow e.etype with
+				let el , t, e = (match follow e.etype with
 				| TFun (args,r) ->
 					let fopts = (match acc with AKField (_,f) -> Some (f.cf_name,f.cf_meta) | _ -> match e.eexpr with TField (e,f) -> Some (f,[]) | _ -> None) in
-					unify_call_params ctx fopts el args r p false
+					let el, tfunc = unify_call_params ctx fopts el args r p false in
+					el,(match tfunc with TFun(_,r) -> r | _ -> assert false), {e with etype = tfunc}
 				| TMono _ ->
 					let t = mk_mono() in
 					let el = List.map (type_expr ctx) el in
 					unify ctx (tfun (List.map (fun e -> e.etype) el) t) e.etype e.epos;
-					el, t
+					el, t, e
 				| t ->
 					let el = List.map (type_expr ctx) el in
-					el, if t == t_dynamic then
+					el, (if t == t_dynamic then
 						t_dynamic
 					else if ctx.untyped then
 						mk_mono()
 					else
-						error (s_type (print_context()) e.etype ^ " cannot be called") e.epos
+						error (s_type (print_context()) e.etype ^ " cannot be called") e.epos), e
 				) in
 				if ctx.com.dead_code_elimination then
 					(match e.eexpr, el with
@@ -2668,7 +2757,6 @@ let rec create com =
 		in_display = false;
 		in_macro = Common.defined com "macro";
 		ret = mk_mono();
-		ret_exprs = [];
 		locals = PMap.empty;
 		local_types = [];
 		local_using = [];

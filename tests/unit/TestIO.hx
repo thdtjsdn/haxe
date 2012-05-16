@@ -43,10 +43,14 @@ class TestIO extends Test {
 		excv(function() o.writeBytes(b,3,20),OutsideBounds);
 
 		o.writeByte(98);
-		#if (neko || flash9 || php || cpp)
 		o.writeDouble(1.23);
+		o.writeDouble(-1.23);
+		o.writeDouble(0.0);
+		o.writeDouble(-0.0);
 		o.writeFloat(1.2e10);
-		#end
+		o.writeFloat(-1.2e10);
+		o.writeFloat(0.0);
+		o.writeFloat(-0.0);
 		o.writeByte(99);
 
 		var str = "Héllo World !";
@@ -62,7 +66,8 @@ class TestIO extends Test {
 		#if !neko
 		// in neko, we can't represent invalid 31 bits integers anyway
 		excv(function() o.writeInt31(1 << 30),Overflow);
-		excv(function() o.writeInt31(-((1 << 30) + 1)),Overflow);
+		excv(function() o.writeInt31( -((1 << 30) + 1)), Overflow);
+		excv(function() o.writeUInt30(0x40 << 24),Overflow);
 		#end
 		o.writeInt8(-5);
 		excv(function() o.writeInt8(128),Overflow);
@@ -75,7 +80,6 @@ class TestIO extends Test {
 		excv(function() o.writeUInt24(-1),Overflow);
 		o.writeUInt30(0x3FAABBCC);
 		excv(function() o.writeUInt30(-1),Overflow);
-		excv(function() o.writeUInt30(0x40 << 24),Overflow);
 
 		o.writeInt32(haxe.Int32.make(0xA0FF,0xEEDD));
 		o.writeInt32(haxe.Int32.make(0xC0FF,0xEEDD));
@@ -91,14 +95,14 @@ class TestIO extends Test {
 		eq( i.read(5).compare(b.sub(3,5)), 0 );
 
 		eq( i.readByte(), 98 );
-		#if (neko || flash9 || php || cpp)
 		eq( i.readDouble(), 1.23 );
+		eq( i.readDouble(), -1.23 );
+		eq( i.readDouble(), 0.0 );
+		eq( i.readDouble(), -0.0 );
 		eq( i.readFloat(), 1.2e10 );
-		#else
-		// these two are not implemented
-		exc(function() i.readDouble());
-		exc(function() i.readFloat());
-		#end
+		eq( i.readFloat(), -1.2e10 );
+		eq( i.readFloat(), 0.0 );
+		eq( i.readFloat(), -0.0 );
 		eq( i.readByte(), 99 );
 
 		eq( i.readString(haxe.io.Bytes.ofString(str).length), str );
