@@ -1302,6 +1302,11 @@ and type_ident_noerr ctx i is_type p mode =
 
 and type_expr_with_type ~unify ctx e t =
 	match e with
+	| (EParenthesis e,p) ->
+		let e = type_expr_with_type ~unify ctx e t in
+		mk (TParenthesis e) e.etype p;
+	| (ECall (e,el),p) ->
+		type_call ctx e el t p
 	| (EFunction _,_) ->
 		let old = ctx.param_type in
 		(try
@@ -1347,6 +1352,24 @@ and type_expr_with_type ~unify ctx e t =
 						e
 					) el in
 					mk (TArrayDecl el) t p)
+			| _ ->
+				type_expr ctx e)
+	| (EObjectDecl el,p) ->
+		(match t with
+		| None -> type_expr ctx e
+		| Some t ->
+			match follow t with
+			| TAnon a ->
+				(try 
+					let el = List.map (fun (n, e) ->
+						let t = (PMap.find n a.a_fields).cf_type in
+						let e = type_expr_with_type ~unify ctx e (Some t) in
+						unify ctx e.etype t e.epos;
+						(n,e)
+					) el in
+					mk (TObjectDecl el) t p
+				with Not_found ->
+					type_expr ctx e)
 			| _ ->
 				type_expr ctx e)
 	| _ ->
@@ -1708,7 +1731,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		let e = type_expr ctx e in
 		mk (TThrow e) (mk_mono()) p
 	| ECall (e,el) ->
-		type_call ctx e el p
+		type_call ctx e el None p
 	| ENew (t,el) ->
 		let t = Typeload.load_instance ctx t p true in
 		let el, c , params = (match follow t with
@@ -1921,7 +1944,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		unify ctx e.etype t e.epos;
 		if e.etype == t then e else mk (TCast (e,None)) t p
 
-and type_call ctx e el p =
+and type_call ctx e el t p =
 	match e, el with
 	| (EConst (Ident "trace"),p) , e :: el ->
 		if Common.defined ctx.com "no_traces" then
@@ -1983,8 +2006,9 @@ and type_call ctx e el p =
 							| TFun ( _ :: args,r) -> unify_call_params ctx (Some (ef.cf_name,ef.cf_meta)) el args r p (ef.cf_kind = Method MethInline)
 							| _ -> assert false
 						) in
-						let et = {et with etype = tfunc} in
-						make_call ctx et (eparam::params) (match tfunc with TFun(_,r) -> r | _ -> assert false) p
+						let args,r = match tfunc with TFun(args,r) -> args,r | _ -> assert false in
+						let et = {et with etype = TFun(("",false,eparam.etype) :: args,r)} in
+						make_call ctx et (eparam::params) r p
 					| _ -> assert false)
 				| _ -> assert false)
 			| AKMacro (ethis,f) ->
@@ -1992,7 +2016,7 @@ and type_call ctx e el p =
 				| TTypeExpr (TClassDecl c) ->
 					(match ctx.g.do_macro ctx MExpr c.cl_path f.cf_name el p with
 					| None -> type_expr ctx (EConst (Ident "null"),p)
-					| Some e -> type_expr ctx e)
+					| Some e -> type_expr_with_type unify ctx e t)
 				| _ ->
 					(* member-macro call : since we will make a static call, let's found the actual class and not its subclass *)
 					(match follow ethis.etype with
@@ -2603,7 +2627,27 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 		let ttype = Typeload.load_instance ctx2 cttype p false in
 		unify ctx2 mret ttype mpos
 	);
-	let args = (try
+	(*
+		if the function's last argument is of Array<Expr>, split the argument list and use [] for unify_call_params
+	*)
+	let el,el2 = match List.rev margs with
+		| (_,_,TInst({cl_path=([], "Array")},[e])) :: rest when (try Type.type_eq EqStrict e expr; true with _ -> false) ->
+			let rec loop el1 el2 margs el = match margs,el with
+				| _,[] ->
+					el1,el2
+				| _ :: [], (EArrayDecl e,_) :: [] ->
+					(el1 @ [EArrayDecl [],p]),e
+				| [], e :: el ->
+					loop el1 (el2 @ [e]) [] el
+				| _ :: [], e :: el ->
+					loop (el1 @ [EArrayDecl [],p]) el2 [] (e :: el)
+				| _ :: margs, e :: el ->
+					loop (el1 @ [e]) el2 margs el
+			in
+			loop [] [] margs el
+		| _ -> el,[]
+	in
+	let args =
 		(*
 			force default parameter types to haxe.macro.Expr, and if success allow to pass any value type since it will be encoded
 		*)
@@ -2644,12 +2688,11 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 				| None -> assert false
 				| Some v -> v
 		) eargs elt
-	with Error (e,p) ->
-		(* last try : maybe we have an Array<Expr> ? *)
-		match margs with
-		| [(_,_,t)] when (try unify_raise ctx2 t (ctx2.t.tarray expr) p; true with _ -> false) -> [Interp.enc_array (List.map Interp.encode_expr el)]
-		| _ -> raise (Error (e,p))
-	) in
+	in
+	let args = match el2 with
+		| [] -> args
+		| _ -> (match List.rev args with _::args -> args | [] -> []) @ [Interp.enc_array (List.map Interp.encode_expr el2)]
+	in
 	let call() =
 		match call_macro args with
 		| None -> None

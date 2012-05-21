@@ -16,7 +16,15 @@ class TestType extends Test {
 		var tExpected = haxe.macro.Context.typeof(expected);
 		var tActual = haxe.macro.Context.typeof(actual);
 		return haxe.macro.Context.parse("{Test.count++; eq('" +Std.string(tActual) + "', '" +Std.string(tExpected) + "');}", haxe.macro.Context.currentPos());
-	}	
+	}
+	
+	@:macro static function typeError(e:haxe.macro.Expr) {
+		var result = try {
+			haxe.macro.Context.typeof(e);
+			"false";
+		} catch (e:Dynamic) "true";
+		return { pos: haxe.macro.Context.currentPos(), expr: haxe.macro.Expr.ExprDef.EConst(haxe.macro.Expr.Constant.CIdent(result)) };
+	}
 
 	public function testType() {
 		var name = u("unit")+"."+u("MyClass");
@@ -181,7 +189,6 @@ class TestType extends Test {
 
 	function testCallback()
 	{
-		
 		var func = function(a:Int, b:String, c:Float) return a;
 
 		#if !macro
@@ -259,5 +266,67 @@ class TestType extends Test {
 		var foo = function ( x : Int, ?p : haxe.PosInfos ) { return "foo" + x; }
 		var f : Void -> String = callback(foo, 0);
  		eq("foo0", f());
+	}
+	
+	function testConstantAnonCovariance()
+	{
+		#if !macro
+		var a: { v:Float };
+		var b:Dynamic = "bar";
+		f(typeError(a = { v:0.2 } ));
+		f(typeError(a = { v:0 } ));
+		typedAs(a = { v: 0 }, a);
+		typedAs(a = { v: 0.2 }, a);
+		t(typeError(a = { v: "foo" } ));
+		f(typeError(a = { v: untyped "foo" } ));
+		f(typeError(a = { v: b } ));
+		f(typeError( { var b: { v:Dynamic } = { v: "foo" };} ));
+		t(typeError( { var b: { v:Int } = { v: 1.2 };} ));
+		#end
+	}
+	
+	function testCovariantReturn()
+	{
+		#if !macro
+		var b:Base = null;
+		var c1:Child1 = null;
+		var c2_1:Child2_1 = null;
+		
+		var c = new Cov2();
+		typedAs(c.covariant(), c1);
+		t(Std.is(c.covariant(), Child1));
+		t(Std.is(cast(c, Cov1).covariant(), Child1));
+		
+		// base class reference
+		var br:Cov1 = c;
+		typedAs(br.covariant(), b);
+		t(Std.is(br.covariant(), Child1));
+		
+		// interface reference
+		var ir:CovI = c;
+		typedAs(ir.covariant(), b);
+		t(Std.is(ir.covariant(), Child1));
+		
+		// dynamic
+		var dr:Dynamic = c;
+		t(Std.is(dr.covariant(), Child1));
+		
+		// interface covariance
+		var c3 = new Cov3();
+		typedAs(c3.covariant(), c2_1);
+		t(Std.is(c3.covariant(), Child2_1));
+		#end
+	}
+	
+	function testContravariantArgs()
+	{
+		#if !macro
+		var b = function(arg:Base):Void { };
+		var c1 = function(arg:Child1):Void { };
+		
+		var c = new Ctrv2();
+		typedAs(c.contravariant, b);
+		typedAs(cast (c, Ctrv1).contravariant, c1);
+		#end
 	}
 }

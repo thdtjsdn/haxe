@@ -499,12 +499,21 @@ let on_generate ctx t =
 			c.cl_ordered_statics <- f :: c.cl_ordered_statics;
 			c.cl_statics <- PMap.add f.cf_name f c.cl_statics;
 		end;
-		if not ctx.in_macro then List.iter (fun f ->
-			if f.cf_kind = Method MethMacro || has_meta ":extern" f.cf_meta then begin
+		let do_remove f =
+			(not ctx.in_macro && f.cf_kind = Method MethMacro) || has_meta ":extern" f.cf_meta
+		in
+		List.iter (fun f ->
+			if do_remove f then begin
 				c.cl_statics <- PMap.remove f.cf_name c.cl_statics;
 				c.cl_ordered_statics <- List.filter (fun f2 -> f != f2) c.cl_ordered_statics;
 			end
 		) c.cl_ordered_statics;
+		List.iter (fun f ->
+			if do_remove f then begin
+				c.cl_fields <- PMap.remove f.cf_name c.cl_fields;
+				c.cl_ordered_fields <- List.filter (fun f2 -> f != f2) c.cl_ordered_fields;
+			end
+		) c.cl_ordered_fields;
 		(match build_metadata ctx.com t with
 		| None -> ()
 		| Some e ->
@@ -1177,34 +1186,35 @@ let stack_block ctx c m e =
 	on some platforms which doesn't support type parameters, we must have the
 	exact same type for overriden/implemented function as the original one
 *)
+
+let rec find_field c f =
+	try
+		(match c.cl_super with
+		| None ->
+			raise Not_found
+		| Some (c,_) ->
+			find_field c f)
+	with Not_found -> try
+		let rec loop = function
+			| [] ->
+				raise Not_found
+			| (c,_) :: l ->
+				try
+					find_field c f
+				with
+					Not_found -> loop l
+		in
+		loop c.cl_implements
+	with Not_found ->
+		let f = PMap.find f.cf_name c.cl_fields in
+		(match f.cf_kind with Var { v_read = AccRequire _ } -> raise Not_found | _ -> ());
+		f
+
 let fix_override com c f fd =
 	c.cl_fields <- PMap.remove f.cf_name c.cl_fields;
-	let rec find_field c interf =
-		try
-			(match c.cl_super with
-			| None ->
-				raise Not_found
-			| Some (c,_) ->
-				find_field c false)
-		with Not_found -> try
-			let rec loop = function
-				| [] ->
-					raise Not_found
-				| (c,_) :: l ->
-					try
-						find_field c true
-					with
-						Not_found -> loop l
-			in
-			loop c.cl_implements
-		with Not_found ->
-			let f = PMap.find f.cf_name c.cl_fields in
-			(match f.cf_kind with Var { v_read = AccRequire _ } -> raise Not_found | _ -> ());
-			interf, f
-	in
-	let f2 = (try Some (find_field c true) with Not_found -> None) in
-	let f = (match f2 with
-		| Some (interf,f2) ->
+	let f2 = (try Some (find_field c f) with Not_found -> None) in
+	let f = (match f2,fd with
+		| Some (f2), Some(fd) ->
 			let targs, tret = (match follow f2.cf_type with TFun (args,ret) -> args, ret | _ -> assert false) in
 			let changed_args = ref [] in
 			let prefix = "_tmp_" in
@@ -1234,7 +1244,11 @@ let fix_override com c f fd =
 			} in
 			let fde = (match f.cf_expr with None -> assert false | Some e -> e) in
 			{ f with cf_expr = Some { fde with eexpr = TFunction fd2 }; cf_type = TFun(targs,tret) }
-		| _ -> f
+		| Some(f2), None when c.cl_interface ->
+			let targs, tret = (match follow f2.cf_type with TFun (args,ret) -> args, ret | _ -> assert false) in
+			{ f with cf_type = TFun(targs,tret) }
+		| _ ->
+			f
 	) in
 	c.cl_fields <- PMap.add f.cf_name f c.cl_fields;
 	f
@@ -1245,12 +1259,29 @@ let fix_overrides com t =
 		c.cl_ordered_fields <- List.map (fun f ->
 			match f.cf_expr, f.cf_kind with
 			| Some { eexpr = TFunction fd }, Method (MethNormal | MethInline) ->
-				fix_override com c f fd
+				fix_override com c f (Some fd)
+			| None, Method (MethNormal | MethInline) when c.cl_interface ->
+				fix_override com c f None
 			| _ ->
 				f
 		) c.cl_ordered_fields
 	| _ ->
 		()
+
+(*	
+	PHP does not allow abstract classes extending other abstract classes to override any fields, so these duplicates
+	must be removed from the child interface
+*)	
+let fix_abstract_inheritance com t =
+	match t with
+	| TClassDecl c when c.cl_interface ->
+		c.cl_ordered_fields <- List.filter (fun f ->
+			let b = try (find_field c f) == f
+			with Not_found -> false in
+			if not b then c.cl_fields <- PMap.remove f.cf_name c.cl_fields;
+			b;
+		) c.cl_ordered_fields
+	| _ -> ()
 
 (* -------------------------------------------------------------------------- *)
 (* MISC FEATURES *)

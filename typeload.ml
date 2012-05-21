@@ -330,7 +330,7 @@ let load_type_opt ?(opt=false) ctx p t =
 
 let valid_redefinition ctx f1 t1 f2 t2 =
 	let valid t1 t2 =
-		type_eq EqStrict t1 t2;
+		unify_raise ctx t1 t2 f1.cf_pos;
 		if is_null t1 <> is_null t2 then raise (Unify_error [Cannot_unify (t1,t2)]);
 	in
 	let t1, t2 = (match f1.cf_params, f2.cf_params with
@@ -344,12 +344,20 @@ let valid_redefinition ctx f1 t1 f2 t2 =
 	| TFun (args1,r1) , TFun (args2,r2) when List.length args1 = List.length args2 ->
 		List.iter2 (fun (n,o1,a1) (_,o2,a2) ->
 			if o1 <> o2 then raise (Unify_error [Not_matching_optional n]);
-			valid a1 a2;
+			valid a2 a1;
 		) args1 args2;
 		valid r1 r2;
 	| _ , _ ->
 		(* in case args differs, or if an interface var *)
-		valid t1 t2
+		type_eq EqStrict t1 t2;
+		if is_null t1 <> is_null t2 then raise (Unify_error [Cannot_unify (t1,t2)])
+
+let copy_meta meta_src meta_target sl =
+	let meta = ref meta_target in
+	List.iter (fun (m,e,p) ->
+		if List.mem m sl then meta := (m,e,p) :: !meta
+	) meta_src;
+	!meta
 
 let check_overriding ctx c p () =
 	match c.cl_super with
@@ -923,6 +931,7 @@ let init_class ctx c p herits fields =
 									| TConst _ -> true
 									| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod),e1,e2) -> is_const e1 && is_const e2
 									| TParenthesis e -> is_const e
+									| TTypeExpr _ -> true
 									| _ -> false
 								in
 								if not (is_const e) then display_error ctx "Inline variable must be a constant value" p;
@@ -937,6 +946,13 @@ let init_class ctx c p herits fields =
 			) in
 			f, false, cf, delay
 		| FFun fd ->
+			(match c.cl_super with
+				| None -> ()
+				| Some (c,_) ->
+					try
+						let sf = PMap.find name c.cl_fields in
+						f.cff_meta <- copy_meta sf.cf_meta f.cff_meta [":overload"];
+					with Not_found -> ());
 			let params = ref [] in
 			params := List.map (fun (n,flags) ->
 				(match flags with
