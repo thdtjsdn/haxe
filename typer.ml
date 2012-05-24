@@ -107,6 +107,11 @@ let classify t =
 	| TDynamic _ -> KDyn
 	| _ -> KOther
 
+let object_field f =
+	let pf = Parser.quoted_ident_prefix in
+	let pflen = String.length pf in		
+	if String.length f >= pflen && String.sub f 0 pflen = pf then String.sub f pflen (String.length f - pflen), false else f, true
+
 let type_field_rec = ref (fun _ _ _ _ _ -> assert false)
 let type_expr_with_type_rec = ref (fun ~unify _ _ _ -> assert false)
 
@@ -1359,17 +1364,22 @@ and type_expr_with_type ~unify ctx e t =
 		| None -> type_expr ctx e
 		| Some t ->
 			match follow t with
-			| TAnon a ->
-				(try 
-					let el = List.map (fun (n, e) ->
-						let t = (PMap.find n a.a_fields).cf_type in
-						let e = type_expr_with_type ~unify ctx e (Some t) in
-						unify ctx e.etype t e.epos;
-						(n,e)
-					) el in
-					mk (TObjectDecl el) t p
-				with Not_found ->
-					type_expr ctx e)
+			| TAnon a when not (PMap.is_empty a.a_fields) ->
+				let fields = Hashtbl.create 0 in
+				let el = List.map (fun (n, e) ->
+					let n,add = object_field n in
+					if Hashtbl.mem fields n then error ("Duplicate field in object declaration : " ^ n) (snd e);
+					let t = try (PMap.find n a.a_fields).cf_type with Not_found -> if ctx.untyped then t_dynamic else error ("Structure has extra field : " ^ n) (snd e) in
+					Hashtbl.add fields n true;
+					let e = type_expr_with_type ~unify ctx e (Some t) in
+					unify ctx e.etype t e.epos;
+					(n,e)
+				) el in
+				if not ctx.untyped then	PMap.iter (fun n cf ->
+						if not (has_meta ":optional" cf.cf_meta) && not (Hashtbl.mem fields n) then error ("Structure has no field " ^ n) p;
+					) a.a_fields;
+				a.a_status := Closed;
+				mk (TObjectDecl el) t p
 			| _ ->
 				type_expr ctx e)
 	| _ ->
@@ -1571,10 +1581,8 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		let e = type_expr ctx ~need_val e in
 		mk (TParenthesis e) e.etype p
 	| EObjectDecl fl ->
-		let pf = Parser.quoted_ident_prefix in
-		let pflen = String.length pf in
 		let rec loop (l,acc) (f,e) =
-			let f, add = if String.length f >= pflen && String.sub f 0 pflen = pf then String.sub f pflen (String.length f - pflen), false else f, true in
+			let f,add = object_field f in
 			if PMap.mem f acc then error ("Duplicate field in object declaration : " ^ f) p;
 			let e = type_expr ctx e in
 			let cf = mk_field f e.etype e.epos in
@@ -2520,6 +2528,7 @@ let make_macro_api ctx p =
 			let m, tdef, pos = (try Interp.decode_type_def v with Interp.Invalid_expr -> Interp.exc (Interp.VString "Invalid type definition")) in
 			let mdep = Typeload.type_module ctx m ctx.current.m_extra.m_file [tdef,pos] pos in
 			mdep.m_extra.m_kind <- MFake;
+			mdep.m_extra.m_time <- -1.;
 			add_dependency ctx.current mdep;
 		);
 		Interp.module_dependency = (fun mpath file ismacro ->
