@@ -134,19 +134,9 @@ struct
     let float_cl = get_cl ( get_type gen (["java";"lang"], "Double")) in
     
     let is_var = alloc_var "__is__" t_dynamic in
-      let block = ref [] in
     
     let rec run e =
       match e.eexpr with 
-        | TBlock bl ->
-          let old_block = !block in
-          block := [];
-          List.iter (fun e -> let e = run e in block := e :: !block) bl;
-          let ret = List.rev !block in
-          block := old_block;
-          
-          { e with eexpr = TBlock(ret) }
-        
         (* Math changes *)
         | TField( { eexpr = TTypeExpr( TClassDecl( { cl_path = (["java";"lang"], "Math") }) ) }, "NaN" ) ->
           mk_static_field_access_infer float_cl "NaN" e.epos []
@@ -489,7 +479,6 @@ struct
     let tbyte = match ( get_type gen (["java"], "Int8") ) with | TTypeDecl t -> TType(t,[]) | _ -> assert false in
     let tshort = match ( get_type gen (["java"], "Int16") ) with | TTypeDecl t -> TType(t,[]) | _ -> assert false in
     let tsingle = match ( get_type gen ([], "Single") ) with | TTypeDecl t -> TType(t,[]) | _ -> assert false in
-    let bool_cl = get_cl ( get_type gen (["java";"lang"], "Boolean")) in
     let string_ext = get_cl ( get_type gen (["haxe";"lang"], "StringExt")) in
     
     let is_string t = match follow t with | TInst({ cl_path = ([], "String") }, []) -> true | _ -> false in
@@ -524,8 +513,15 @@ struct
           (* let unboxed_type gen t tbyte tshort tchar tfloat = match follow t with *)
           run { e with etype = unboxed_type gen e.etype tbyte tshort tchar tsingle }
         
-        | TCast(expr, m) when is_bool e.etype ->
-          { e with eexpr = TCast(mk_cast (TInst(bool_cl, [])) (run expr), m) }
+        | TCast(expr, _) when is_bool e.etype ->
+          {
+            eexpr = TCall(
+              mk_static_field_access_infer runtime_cl "toBool" expr.epos [],
+              [ run expr ]
+            );
+            etype = basic.tbool;
+            epos = e.epos
+          }
         
         | TCast(expr, _) when is_int_float gen e.etype && not (is_int_float gen expr.etype) ->
           let needs_cast = match gen.gfollow#run_f e.etype with
@@ -660,6 +656,10 @@ let configure gen =
                   | TType ({ t_path = ["java"],"Char16" },[])
                   | TType ({ t_path = [],"Single" },[]) -> basic.tnull f_t
                   (*| TType ({ t_path = [], "Null"*)
+                  | TInst (cl, ((_ :: _) as p)) ->
+                    TInst(cl, List.map (fun _ -> t_dynamic) p)
+                  | TEnum (e, ((_ :: _) as p)) ->
+                    TEnum(e, List.map (fun _ -> t_dynamic) p)
                   | _ -> t
               ) params
   in
@@ -872,6 +872,8 @@ let configure gen =
               )
             | TFloat s -> 
               write w s;
+              (* fix for Int notation, which only fit in a Float *)
+              (if not (String.contains s '.' || String.contains s 'e' || String.contains s 'E') then write w ".0");
               (match real_type e.etype with
                 | TType( { t_path = ([], "Single") }, [] ) -> write w "f"
                 | _ -> ()
@@ -900,8 +902,13 @@ let configure gen =
           print w "%s." (path_s e.e_path); write_field w s
         | TArray (e1, e2) ->
           expr_s w e1; write w "["; expr_s w e2; write w "]"
-        | TBinop (op, e1, e2) ->
+        | TBinop ((Ast.OpAssign as op), e1, e2)
+        | TBinop ((Ast.OpAssignOp _ as op), e1, e2) ->
           expr_s w e1; write w ( " " ^ (Ast.s_binop op) ^ " " ); expr_s w e2
+        | TBinop (op, e1, e2) ->
+          write w "( ";
+          expr_s w e1; write w ( " " ^ (Ast.s_binop op) ^ " " ); expr_s w e2;
+          write w " )"
         | TField (e, s) | TClosure (e, s) ->
           expr_s w e; write w "."; write_field w s
         | TTypeExpr (TClassDecl { cl_path = (["haxe"], "Int32") }) ->
@@ -1035,7 +1042,9 @@ let configure gen =
             print w "%s " (t_s var.v_type);
             write_id w var.v_name;
             (match eopt with
-              | None -> ()
+              | None -> 
+                write w " = ";
+                expr_s w (null var.v_type e.epos)
               | Some e ->
                 write w " = ";
                 expr_s w e
@@ -1303,9 +1312,24 @@ let configure gen =
         false
     in
     
+    let rec loop_meta meta acc =
+      match meta with
+        | (":SuppressWarnings", [Ast.EConst (Ast.String w),_],_) :: meta -> loop_meta meta (w :: acc)
+        | _ :: meta -> loop_meta meta acc
+        | _ -> acc
+    in
+    
+    let suppress_warnings = loop_meta cl.cl_meta [ "rawtypes"; "unchecked" ] in
+    
     write w "import haxe.root.*;";
     newline w;
-    write w "@SuppressWarnings(value={\"rawtypes\", \"unchecked\"})";
+    write w "@SuppressWarnings(value={";
+    let first = ref true in
+    List.iter (fun s ->
+      (if !first then first := false else write w ", ");
+      print w "\"%s\"" (escape s)
+    ) suppress_warnings;
+    write w "})";
     newline w;
     
     let clt, access, modifiers = get_class_modifiers cl.cl_meta (if cl.cl_interface then "interface" else "class") "public" [] in
@@ -1430,7 +1454,7 @@ let configure gen =
   
   ClosuresToClass.configure gen (ClosuresToClass.default_implementation closure_t (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Function")) ));
   
-  EnumToClass.configure gen (None) false true (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Enum")) ) false;
+  EnumToClass.configure gen (None) false true (get_cl (Hashtbl.find gen.gtypes (["haxe";"lang"],"Enum")) ) false true;
   
   InterfaceVarsDeleteModf.configure gen;
   
@@ -1714,6 +1738,8 @@ let configure gen =
   
   ExpressionUnwrap.configure gen (ExpressionUnwrap.traverse gen (fun e -> Some { eexpr = TVars([mk_temp gen "expr" e.etype, Some e]); etype = gen.gcon.basic.tvoid; epos = e.epos }));
   
+  UnnecessaryCastsRemoval.configure gen;
+  
   IntDivisionSynf.configure gen (IntDivisionSynf.default_implementation gen true);
   
   UnreachableCodeEliminationSynf.configure gen (UnreachableCodeEliminationSynf.traverse gen true true true);
@@ -1752,7 +1778,8 @@ let before_generate con =
   List.iter (Codegen.fix_overrides con) con.types
 
 let generate con =
-	let gen = new_ctx con in
+  let gen = new_ctx con in
+  gen.gallow_tp_dynamic_conversion <- true;
   
   let basic = con.basic in
   (* make the basic functions in java *)
@@ -1764,6 +1791,7 @@ let generate con =
   ] in
   List.iter (fun cf -> gen.gbase_class_fields <- PMap.add cf.cf_name cf gen.gbase_class_fields) basic_fns;
   
-  try
+  (try
     configure gen
-  with | TypeNotFound path -> con.error ("Error. Module '" ^ (path_s path) ^ "' is required and was not included in build.")  Ast.null_pos
+  with | TypeNotFound path -> con.error ("Error. Module '" ^ (path_s path) ^ "' is required and was not included in build.")  Ast.null_pos);
+  debug_mode := false

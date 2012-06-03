@@ -45,7 +45,7 @@ let type_function_param ctx t e opt p =
 
 let type_static_var ctx t e p =
 	ctx.curfun <- FStatic;
-	let e = type_expr ctx e true in
+	let e = type_expr_with_type ctx e (Some t) false in
 	unify ctx e.etype t p;
 	(* specific case for UInt statics *)
 	match t with
@@ -265,7 +265,7 @@ and load_complex_type ctx p t =
 					in
 					load_complex_type ctx p t, Var { v_read = access i1 true; v_write = access i2 false }
 			) in
-			PMap.add n {
+			let cf = {
 				cf_name = n;
 				cf_type = t;
 				cf_pos = p;
@@ -275,7 +275,10 @@ and load_complex_type ctx p t =
 				cf_expr = None;
 				cf_doc = f.cff_doc;
 				cf_meta = f.cff_meta;
-			} acc
+				cf_overloads = [];
+			} in
+			init_meta_overloads ctx cf;
+			PMap.add n cf acc
 		in
 		mk_anon (List.fold_left loop PMap.empty l)
 	| CTFunction (args,r) ->
@@ -287,6 +290,22 @@ and load_complex_type ctx p t =
 				let t, opt = (match t with CTOptional t -> t, true | _ -> t,false) in
 				"",opt,load_complex_type ctx p t
 			) args,load_complex_type ctx p r)
+
+and init_meta_overloads ctx cf =
+	let overloads = ref [] in
+	cf.cf_meta <- List.filter (fun m ->
+		match m with
+		| (":overload",[(EFunction (fname,f),p)],_)  ->
+			if fname <> None then error "Function name must not be part of @:overload" p;
+			(match f.f_expr with Some (EBlock [], _) -> () | _ -> error "Overload must only declare an empty method body {}" p);
+			let topt = function None -> error "Explicit type required" p | Some t -> load_complex_type ctx p t in
+			let args = List.map (fun (a,opt,t,_) ->  a,opt,topt t) f.f_args in
+			overloads := (args,topt f.f_type) :: !overloads;
+			false
+		| _ ->
+			true
+	) cf.cf_meta;
+	cf.cf_overloads <- List.map (fun (args,ret) -> { cf with cf_type = TFun (args,ret) }) (List.rev !overloads)
 
 let hide_types ctx =
 	let old_locals = ctx.local_types in
@@ -741,8 +760,8 @@ let build_module_def ctx mt meta fvars fbuild =
 			) in
 			let rec getpath (e,p) =
 				match e with
-				| EConst (Ident i) | EConst (Type i) -> [i]
-				| EField (e,f) | EType (e,f) -> f :: getpath e
+				| EConst (Ident i) -> [i]
+				| EField (e,f) -> f :: getpath e
 				| _ -> error "Build call parameter must be a class path" p
 			in
 			let s = String.concat "." (List.rev (getpath epath)) in
@@ -834,6 +853,8 @@ let init_class ctx c p herits fields =
 
 	let fields = if not display_file || Common.defined ctx.com "no-copt" then fields else Optimizer.optimize_completion c fields in
 
+	let mark_used cf = if ctx.com.dead_code_elimination then cf.cf_meta <- (":?used",[],p) :: cf.cf_meta in
+
 	let rec is_full_type t =
 		match t with
 		| TFun (args,ret) -> is_full_type ret && List.for_all (fun (_,_,t) -> is_full_type t) args
@@ -863,6 +884,53 @@ let init_class ctx c p herits fields =
 		end
 	in
 
+	let bind_var ctx cf e stat =
+		let p = cf.cf_pos in
+		if not stat && has_field cf.cf_name c.cl_super then error ("Redefinition of variable " ^ cf.cf_name ^ " in subclass is not allowed") p;
+		let t = cf.cf_type in
+		match e with
+		| None when ctx.com.dead_code_elimination && not ctx.com.display ->
+			let r = exc_protect (fun r ->
+				r := (fun() -> t);
+				mark_used cf;
+				t
+			) in
+			cf.cf_type <- TLazy r;
+			(fun() -> ())
+		| None ->
+			(fun() -> ())
+		| Some e ->
+			if not stat then error "Member variable initialization is not allowed outside of class constructor" p;
+			let r = exc_protect (fun r ->
+				if not !return_partial_type then begin
+					r := (fun() -> t);
+					if ctx.com.verbose then Common.log ctx.com ("Typing " ^ (if ctx.in_macro then "macro " else "") ^ s_type_path c.cl_path ^ "." ^ cf.cf_name);
+					mark_used cf;
+					let e = type_static_var ctx t e p in
+					let e = (match cf.cf_kind with
+					| Var { v_read = AccInline } ->
+						let e = ctx.g.do_optimize ctx e in
+						let rec is_const e =
+							match e.eexpr with
+							| TConst _ -> true
+							| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod),e1,e2) -> is_const e1 && is_const e2
+							| TParenthesis e -> is_const e
+							| TTypeExpr _ -> true
+							| _ -> false
+						in
+						if not (is_const e) then display_error ctx "Inline variable must be a constant value" p;
+						e
+					| _ ->
+						e
+					) in
+					cf.cf_expr <- Some e;
+					cf.cf_type <- t;
+				end;
+				t
+			) in
+			bind_type cf r (snd e) false
+	in
+
 	(* ----------------------- FIELD INIT ----------------------------- *)
 
 	let loop_cf f =
@@ -872,18 +940,12 @@ let init_class ctx c p herits fields =
 		let inline = List.mem AInline f.cff_access in
 		let override = List.mem AOverride f.cff_access in
 		let ctx = { ctx with curclass = c; tthis = tthis } in
-		let mark_used cf =
-			if ctx.com.dead_code_elimination then cf.cf_meta <- (":?used",[],p) :: cf.cf_meta
-		in
 		match f.cff_kind with
 		| FVar (t,e) ->
-			if not stat && has_field name c.cl_super then error ("Redefinition of variable " ^ name ^ " in subclass is not allowed") p;
 			if inline && not stat then error "Inline variable must be static" p;
+			if inline && e = None then error "Inline variable must be initialized" p;
 			if override then error "You cannot override variables" p;
-			(match e with
-			| None when inline -> error "Inline variable must be initialized" p
-			| Some (_,p) when not stat -> error "Member variable initialization is not allowed outside of class constructor" p
-			| _ -> ());
+
 			let t = (match t with
 				| None ->
 					if not stat then error ("Type required for member variable " ^ name) p;
@@ -905,54 +967,11 @@ let init_class ctx c p herits fields =
 				cf_expr = None;
 				cf_public = is_public f.cff_access None;
 				cf_params = [];
+				cf_overloads = [];
 			} in
-			let delay = (match e with
-				| None when ctx.com.dead_code_elimination && not ctx.com.display ->
-					let r = exc_protect (fun r ->
-						r := (fun() -> t);
-						mark_used cf;
-						t
-					) in
-					cf.cf_type <- TLazy r;
-					(fun() -> ())
-				| None ->
-					(fun() -> ())
-				| Some e ->
-					let r = exc_protect (fun r ->
-						if not !return_partial_type then begin
-							r := (fun() -> t);
-							if ctx.com.verbose then Common.log ctx.com ("Typing " ^ (if ctx.in_macro then "macro " else "") ^ s_type_path c.cl_path ^ "." ^ name);
-							mark_used cf;
-							let e = type_static_var ctx t e p in
-							let e = (if inline then 
-								let e = ctx.g.do_optimize ctx e in
-								let rec is_const e =
-									match e.eexpr with
-									| TConst _ -> true
-									| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod),e1,e2) -> is_const e1 && is_const e2
-									| TParenthesis e -> is_const e
-									| TTypeExpr _ -> true
-									| _ -> false
-								in
-								if not (is_const e) then display_error ctx "Inline variable must be a constant value" p;
-								e
-							else e) in
-							cf.cf_expr <- Some e;
-							cf.cf_type <- t;
-						end;
-						t
-					) in
-					bind_type cf r (snd e) false
-			) in
+			let delay = bind_var ctx cf e stat in
 			f, false, cf, delay
 		| FFun fd ->
-			(match c.cl_super with
-				| None -> ()
-				| Some (c,_) ->
-					try
-						let sf = PMap.find name c.cl_fields in
-						f.cff_meta <- copy_meta sf.cf_meta f.cff_meta [":overload"];
-					with Not_found -> ());
 			let params = ref [] in
 			params := List.map (fun (n,flags) ->
 				(match flags with
@@ -1046,7 +1065,9 @@ let init_class ctx c p herits fields =
 				cf_expr = None;
 				cf_public = is_public f.cff_access parent;
 				cf_params = params;
+				cf_overloads = [];
 			} in
+			init_meta_overloads ctx cf;
 			let r = exc_protect (fun r ->
 				if not !return_partial_type then begin
 					r := (fun() -> t);
@@ -1075,9 +1096,6 @@ let init_class ctx c p herits fields =
 			in
 			f, constr, cf, delay
 		| FProp (get,set,t,eo) ->
-			(match eo with
-			| None -> ()
-			| Some e -> error "Property initialization is not allowed" (snd e));
 			if override then error "You cannot override properties" p;
 			let ret = load_complex_type ctx p t in
 			let check_get = ref (fun() -> ()) in
@@ -1125,23 +1143,17 @@ let init_class ctx c p herits fields =
 				cf_type = ret;
 				cf_public = is_public f.cff_access None;
 				cf_params = [];
+				cf_overloads = [];
 			} in
-			if ctx.com.dead_code_elimination && not ctx.com.display then begin
-				let r = exc_protect (fun r ->
-					r := (fun() -> ret);
-					mark_used cf;
-					ret
-				) in
-				cf.cf_type <- TLazy r;
-			end;
-			f, false, cf, (fun() -> (!check_get)(); (!check_set)())
+			let delay = bind_var ctx cf eo stat in
+			f, false, cf, (fun() -> delay(); (!check_get)(); (!check_set)())
 	in
 	let rec check_require = function
 		| [] -> None
 		| (":require",conds,_) :: l ->
 			let rec loop = function
 				| [] -> check_require l
-				| (EConst (Ident i | Type i),_) :: l ->
+				| (EConst (Ident i),_) :: l ->
 					if not (Common.defined ctx.com i) then
 						Some i
 					else
@@ -1371,9 +1383,11 @@ let type_module ctx m file tdecls loadp =
 				let md = ctx.g.do_load_module ctx (t.tpackage,t.tname) p in
 				let types = List.filter (fun t -> not (t_infos t).mt_private) md.m_types in
 				ctx.local_using <- ctx.local_using @ (List.map (resolve_typedef ctx) types);
+				ctx.local_types <- ctx.local_types @ types
 			| Some _ ->
 				let t = load_type_def ctx p t in
-				ctx.local_using<- ctx.local_using @ [resolve_typedef ctx t])
+				ctx.local_using<- ctx.local_using @ [resolve_typedef ctx t];
+				ctx.local_types <- ctx.local_types @ [t])
 		| EClass d ->
 			let c = get_class d.d_name in
 			let checks = if not ctx.com.display then [check_overriding ctx c p; check_interfaces ctx c p] else [] in
@@ -1534,6 +1548,10 @@ let load_module ctx m p =
 			with Not_found ->
 				let rec loop = function
 					| [] ->
+						if s_type_path m = "neko.db._Mysql.D" then begin
+							prerr_endline (String.concat ";" (fst m));
+							assert false;
+						end;
 						raise (Error (Module_not_found m,p))
 					| load :: l ->
 						match load m p with

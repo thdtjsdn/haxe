@@ -167,6 +167,7 @@ let rec type_inline ctx cf f ethis params tret p force =
 	let in_loop = ref false in
 	let in_local_fun = ref false in
 	let cancel_inlining = ref false in
+	let ret_val = (match follow f.tf_type with TEnum ({ e_path = ([],"Void") },[]) -> false | _ -> true) in
 	let rec map term e =
 		let po = e.epos in
 		let e = { e with epos = p } in
@@ -210,20 +211,27 @@ let rec type_inline ctx cf f ethis params tret p force =
 			in_loop := old;
 			{ e with eexpr = TWhile (cond,eloop,flag) }
 		| TMatch (v,en,cases,def) ->
-			let term, t = (match def with Some d when term -> true, ref d.etype | _ -> false, ref e.etype) in
+			let term = term && def <> None in
 			let cases = List.map (fun (i,vl,e) ->
 				let vl = opt (List.map (fun v -> opt (fun v -> (local v).i_subst) v)) vl in
-				let e = map term e in
-				if is_null e.etype then t := e.etype;
-				i, vl, e
+				i, vl, map term e
 			) cases in
-			{ e with eexpr = TMatch (map false v,en,cases,opt (map term) def); etype = !t }
+			let def = opt (map term) def in
+			{ e with eexpr = TMatch (map false v,en,cases,def); etype = if term && ret_val then unify_min ctx ((List.map (fun (_,_,e) -> e) cases) @ (match def with None -> [] | Some e -> [e])) else e.etype }
+		| TSwitch (e1,cases,def) when term ->
+			let term = term && def <> None in
+			let cases = List.map (fun (el,e) ->
+				let el = List.map (map false) el in
+				el, map term e
+			) cases in
+			let def = opt (map term) def in
+			{ e with eexpr = TSwitch (map false e1,cases,def); etype = if ret_val then unify_min ctx ((List.map snd cases) @ (match def with None -> [] | Some e -> [e])) else e.etype }
 		| TTry (e1,catches) ->
 			{ e with eexpr = TTry (map term e1,List.map (fun (v,e) ->
 				let lv = (local v).i_subst in
 				let e = map term e in
 				lv,e
-			) catches) }
+			) catches); etype = if term && ret_val then unify_min ctx (e1::List.map snd catches) else e.etype }
 		| TBlock l ->
 			let old = save_locals ctx in
 			let t = ref e.etype in
@@ -247,9 +255,10 @@ let rec type_inline ctx cf f ethis params tret p force =
 			let econd = map false econd in
 			let eif = map term eif in
 			let eelse = map term eelse in
-			{ e with eexpr = TIf(econd,eif,Some eelse); etype = if is_null eif.etype then eif.etype else eelse.etype }
-		| TParenthesis _ | TIf (_,_,Some _) | TSwitch (_,_,Some _) ->
-			Type.map_expr (map term) e
+			{ e with eexpr = TIf(econd,eif,Some eelse); etype = if ret_val then unify_min ctx [eif;eelse] else e.etype }
+		| TParenthesis e1 ->
+			let e1 = map term e1 in
+			mk (TParenthesis e1) e1.etype e.epos
 		| TUnop ((Increment|Decrement),_,{ eexpr = TLocal v }) ->
 			(read_local v).i_write <- true;
 			Type.map_expr (map false) e
@@ -266,7 +275,7 @@ let rec type_inline ctx cf f ethis params tret p force =
 			old();
 			{ e with eexpr = TFunction { tf_args = args; tf_expr = expr; tf_type = f.tf_type } }
 		| TConst TSuper ->
-			error "Cannot inline function containing super" po			
+			error "Cannot inline function containing super" po
 		| _ ->
 			Type.map_expr (map false) e
 	in
@@ -277,15 +286,15 @@ let rec type_inline ctx cf f ethis params tret p force =
 	*)
 	let subst = ref PMap.empty in
 	let is_constant e =
-		let rec loop e = 
+		let rec loop e =
 			match e.eexpr with
 			| TLocal _
 			| TConst TThis (* not really, but should not be move inside a function body *)
 				-> raise Exit
-			| TEnumField _ 
+			| TEnumField _
 			| TTypeExpr _
-			| TConst _ -> ()			
-			| _ -> 
+			| TConst _ -> ()
+			| _ ->
 				Type.iter loop e
 		in
 		try loop e; true with Exit -> false
@@ -322,10 +331,11 @@ let rec type_inline ctx cf f ethis params tret p force =
 	end else
 		let wrap e =
 			(* we can't mute the type of the expression because it is not correct to do so *)
-			if e.etype == tret then
+			(try
+				type_eq EqStrict (if has_params then map_type e.etype else e.etype) tret;
 				e
-			else
-				mk (TCast (e,None)) tret e.epos
+			with Unify_error _ ->
+				mk (TCast (e,None)) tret e.epos)
 		in
 		let e = (match e.eexpr, init with
 			| TBlock [e] , None -> wrap e
@@ -500,7 +510,7 @@ let rec need_parent e =
 	| TBlock _ | TVars _ | TFunction _ | TUnop _ -> true
 
 let rec add_final_return e t =
-	let def_return p =		
+	let def_return p =
 		let c = (match follow t with
 			| TInst ({ cl_path = [],"Int" },_) -> TInt 0l
 			| TInst ({ cl_path = [],"Float" },_) -> TFloat "0."
@@ -553,7 +563,7 @@ let sanitize_expr com e =
 	in
 	match e.eexpr with
 	| TConst TNull ->
-		if is_static_platform com && not (is_nullable e.etype) then 
+		if is_static_platform com && not (is_nullable e.etype) then
 			(match follow e.etype with
 			| TMono _ -> () (* in these cases the null will cast to default value *)
 			| TFun _ -> () (* this is a bit a particular case, maybe flash-specific actually *)
@@ -600,7 +610,7 @@ let sanitize_expr com e =
 			| _, TEnum ({ e_path = [],"Void" },[]) -> f
 			| Flash , t when Common.defined com "as3" -> { f with tf_expr = add_final_return f.tf_expr t }
 			| Cpp, t -> { f with tf_expr = add_final_return f.tf_expr t }
-			| _ -> f 
+			| _ -> f
 		) in
 		let f = (match f.tf_expr.eexpr with
 			| TBlock _ -> f
@@ -676,7 +686,7 @@ let rec reduce_loop ctx e =
 	let e = Type.map_expr (reduce_loop ctx) e in
 	let check_float op f1 f2 =
 		let f = op f1 f2 in
-		let fstr = string_of_float f in		
+		let fstr = string_of_float f in
 		if (match classify_float f with FP_nan | FP_infinite -> false | _ -> float_of_string fstr = f) then { e with eexpr = TConst (TFloat fstr) } else e
 	in
 	sanitize_expr ctx.com (match e.eexpr with
@@ -736,12 +746,12 @@ let rec reduce_loop ctx e =
 			let fa = (match ca with
 				| TFloat a -> float_of_string a
 				| TInt a -> Int32.to_float a
-				| _ -> assert false 
+				| _ -> assert false
 			) in
 			let fb = (match cb with
 				| TFloat b -> float_of_string b
 				| TInt b -> Int32.to_float b
-				| _ -> assert false 
+				| _ -> assert false
 			) in
 			let fop op = check_float op fa fb in
 			let ebool t =
@@ -824,6 +834,8 @@ let rec reduce_loop ctx e =
 		(match inl with
 		| None -> reduce_expr ctx e
 		| Some e -> reduce_loop ctx e)
+	| TCall ({ eexpr = TClosure (o,name) } as f,el) ->
+		{ e with eexpr = TCall ({ f with eexpr = TField (o,name) },el) }
 	| _ ->
 		reduce_expr ctx e)
 
@@ -857,7 +869,7 @@ let optimize_completion_expr e =
 	let rec loop e =
 		let p = snd e in
 		match fst e with
-		| EConst (Ident n | Type n) ->
+		| EConst (Ident n) ->
 			(try
 				(match get_local n with
 				| Some _ , _ -> ()
@@ -865,12 +877,12 @@ let optimize_completion_expr e =
 			with Not_found ->
 				());
 			e
-		| EBinop (OpAssign,(EConst (Ident n | Type n),_),esub) ->
+		| EBinop (OpAssign,(EConst (Ident n),_),esub) ->
 			(try
 				(match get_local n with
 				| None, None when maybe_typed esub -> decl n None (Some esub)
 				| _ -> ())
-			with Not_found -> 
+			with Not_found ->
 				());
 			map e
 		| EVars vl ->
@@ -894,14 +906,14 @@ let optimize_completion_expr e =
 		| EFunction (v,f) ->
 			(match v with
 			| None -> ()
-			| Some name -> 
+			| Some name ->
 				decl name None (Some e));
 			let old = save() in
 			List.iter (fun (n,_,t,e) -> decl n t e) f.f_args;
 			let e = map e in
 			old();
 			e
-		| EFor ((EIn ((EConst (Ident n | Type n),_) as id,it),p),efor) ->
+		| EFor ((EIn ((EConst (Ident n),_) as id,it),p),efor) ->
 			let it = loop it in
 			let old = save() in
 			decl n None (Some (ECall ((EField ((ECall ((EField (it,"iterator"),p),[]),p),"next"),p),[]),p));
@@ -912,7 +924,7 @@ let optimize_completion_expr e =
 			typing_side_effect := true;
 			map e
 		| ESwitch (e,cases,def) ->
-			let e = loop e in			
+			let e = loop e in
 			let cases = List.map (fun (el,e) ->
 				let el = List.map loop el in
 				let old = save() in
@@ -921,7 +933,7 @@ let optimize_completion_expr e =
 					| ECall (_,pl) ->
 						List.iter (fun p ->
 							match fst p with
-							| EConst (Ident i | Type i) -> decl i None None (* sadly *)
+							| EConst (Ident i) -> decl i None None (* sadly *)
 							| _ -> ()
 						) pl
 					| _ -> ()
@@ -948,7 +960,7 @@ let optimize_completion_expr e =
 			let tmp_hlocals = ref PMap.empty in
 			let rec subst_locals locals e =
 				match fst e with
-				| EConst (Ident n | Type n) ->
+				| EConst (Ident n) ->
 					let p = snd e in
 					(try
 						(match PMap.find n locals.r with

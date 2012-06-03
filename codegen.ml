@@ -67,7 +67,7 @@ let type_constant com c p =
 	| Ident "true" -> mk (TConst (TBool true)) t.tbool p
 	| Ident "false" -> mk (TConst (TBool false)) t.tbool p
 	| Ident "null" -> mk (TConst TNull) (t.tnull (mk_mono())) p
-	| Ident t | Type t -> error ("Invalid constant :  " ^ t) p
+	| Ident t -> error ("Invalid constant :  " ^ t) p
 	| Regexp _ -> error "Invalid constant" p
 
 let rec type_constant_value com (e,p) =
@@ -323,6 +323,7 @@ let extend_xml_proxy ctx c t file p =
 						cf_kind = Var { v_read = AccResolve; v_write = AccNo };
 						cf_params = [];
 						cf_expr = None;
+						cf_overloads = [];
 					} in
 					c.cl_fields <- PMap.add id f c.cl_fields;
 				with
@@ -384,8 +385,8 @@ let build_macro_type ctx pl p =
 		| [TInst ({ cl_kind = KExpr (EArrayDecl [ECall (e,args),_],_) },_)] ->
 			let rec loop e =
 				match fst e with
-				| EField (e,f) | EType (e,f) -> f :: loop e
-				| EConst (Ident i | Type i) -> [i]
+				| EField (e,f) -> f :: loop e
+				| EConst (Ident i) -> [i]
 				| _ -> error "Invalid macro call" p
 			in
 			(match loop e with

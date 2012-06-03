@@ -136,6 +136,7 @@ and tclass_field = {
 	mutable cf_kind : field_kind;
 	cf_params : (string * t) list;
 	mutable cf_expr : texpr option;
+	mutable cf_overloads : tclass_field list;
 }
 
 and tclass_kind =
@@ -534,6 +535,15 @@ let rec is_nullable ?(no_lazy=false) = function
 		is_nullable (apply_params t.t_types tl t.t_type)
 	| TFun _ ->
 		false
+(*
+	Type parameters will most of the time be nullable objects, so we don't want to make it hard for users
+	to have to specify Null<T> all over the place, so while they could be a basic type, let's assume they will not.
+	
+	This will still cause issues with inlining and haxe.rtti.Generic. In that case proper explicit Null<T> is required to
+	work correctly with basic types. This could still be fixed by redoing a nullability inference on the typed AST.
+
+	| TInst ({ cl_kind = KTypeParameter },_) -> false
+*)
 	| TInst ({ cl_path = (["haxe"],"Int32") },[])
 	| TInst ({ cl_path = ([],"Int") },[])
 	| TInst ({ cl_path = ([],"Float") },[])
@@ -612,6 +622,7 @@ type unify_error =
 	| Cannot_unify of t * t
 	| Invalid_field_type of string
 	| Has_no_field of t * string
+	| Has_no_runtime_field of t * string
 	| Has_extra_field of t * string
 	| Invalid_kind of string * field_kind * field_kind
 	| Invalid_visibility of string
@@ -871,10 +882,14 @@ let rec unify a b =
 				let ft, f1 = (try class_field c n with Not_found -> error [has_no_field a n]) in
 				if not (unify_kind f1.cf_kind f2.cf_kind) then error [invalid_kind n f1.cf_kind f2.cf_kind];
 				if f2.cf_public && not f1.cf_public then error [invalid_visibility n];
-				try
+				(try
 					unify_with_access (apply_params c.cl_types tl ft) f2
 				with
-					Unify_error l -> error (invalid_field n :: l)
+					Unify_error l -> error (invalid_field n :: l));
+				(match f1.cf_kind with
+				| Method MethInline when c.cl_extern || has_meta ":extern" f1.cf_meta ->
+					error [Has_no_runtime_field (a,n)]
+				| _ -> ());
 			) an.a_fields;
 			if !(an.a_status) = Opened then an.a_status := Closed;
 		with

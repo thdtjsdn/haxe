@@ -91,16 +91,20 @@ class TestBasetypes extends Test {
 		eq(1 + 1 + 1 + 1 + "1", "41");
 		eq("1" + 1 + 1 + 1 + 1, "11111");
 		eq(1 + 1 + "1" + 1 * 2, "212");
+
+		// check recursive formating
+		var x = [[1], [2, 3]];
+		eq("" + x, "[[1],[2,3]]");
 		
 		// Brackets around array values should not be stripped.
-		var x = [1, "hello"];
-		eq("" + x, "[1, hello]");
+		var x : Array<Dynamic> = [1, "hello"];
+		eq("" + x, "[1,hello]");
 		eq(x + "", "" + x);
-
+		
 		// This is also true for iterables that are arrays.
-		var x:Iterable<Dynamic> = [1, "hello"];
-		eq("" + x, "[1, hello]");
-		eq(x + "", "" + x);		
+		var x:Iterable<Dynamic> = x;
+		eq("" + x, "[1,hello]");
+		eq(x + "", "" + x);
 		
 		// I don't think this should throw an exception on PHP.
 		try {
@@ -108,13 +112,13 @@ class TestBasetypes extends Test {
 		} catch (e:Dynamic)	{
 			Test.report("Could not convert Iterator to String");
 		}
+
+		var str = "he\nlo\"'";
+		eq( Std.string(str), str);
+		eq( Std.string([str]), "[" + str + "]");
 		
-		// This also seems rather odd on some platforms.
-		var x = ["4", 1];
-		t(Std.is(x[0], String));
-		t(Std.is(x[0] + x[0], String));
-		t(Std.is(x[1] + x[1], Int));
-		t(Std.is(x[0] + x[1], String));		
+		var e = MyEnum.C(0, "h");
+		eq( Std.string(e), "C(0,h)");
 	}
 
 	function testMath() {
@@ -200,6 +204,8 @@ class TestBasetypes extends Test {
 		eq( StringTools.fastCodeAt(str, 0), "a".code );
 		eq( StringTools.fastCodeAt(str, 1), "b".code );
 		eq( StringTools.fastCodeAt(str, 2), "c".code );
+		eq(StringTools.fastCodeAt(String.fromCharCode(128), 0), 128);
+		eq(StringTools.fastCodeAt(String.fromCharCode(255), 0), 255);
 		f( StringTools.isEOF(StringTools.fastCodeAt(str, 2)) );
 		t( StringTools.isEOF(StringTools.fastCodeAt(str, 3)) );
 		

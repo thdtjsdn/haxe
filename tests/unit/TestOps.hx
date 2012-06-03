@@ -52,7 +52,23 @@ class TestOps extends Test {
 		eq( 10 % 3 * 5, 5);
 		eq( (10 % 3) * 5, 5);
 		eq( 10 % (3 * 5), 10);
-
+		eq( 100 % 100, 0);
+		eq( -100 % 100, 0);
+		eq( 101.5 % 100, 1.5);
+		eq( -101.5 % 100, -1.5);
+		var x = 101.5;
+		x %= 100;
+		eq( x, 1.5);
+		t(Math.isNaN(5.0 % 0.0));
+		t(Math.isNaN(x %= 0.0));
+		#if !macro
+		//t(Math.isNaN(1 % 0));
+		//t(Math.isNaN(0 % 0));
+		//t(Math.isNaN(x %= 0));
+		#end
+		var x:Dynamic = [-101.5];
+		x[0] %= 100;
+		eq( x[0], -1.5);
 		eq( true ? 1 : 6 * 5, 1);
 		eq( false ? 1 : 6 * 5, 30);
 		eq( (true ? 1 : 6) * 5, 5);

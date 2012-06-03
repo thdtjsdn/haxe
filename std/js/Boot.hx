@@ -146,7 +146,7 @@ class Boot {
 		return __interfLoop(cc.__super__,cl);
 	}
 
-	private static function __instanceof(o : Dynamic,cl) {
+	@:feature("typed_catch") private static function __instanceof(o : Dynamic,cl) {
 		untyped {
 			try {
 				if( __js__("o instanceof cl") ) {
@@ -179,7 +179,7 @@ class Boot {
 		}
 	}
 
-	private static function __cast(o : Dynamic, t : Dynamic) {
+	@:feature("typed_cast") private static function __cast(o : Dynamic, t : Dynamic) {
 		if (__instanceof(o, t)) return o;
 		else throw "Cannot cast " +Std.string(o) + " to " +Std.string(t);
 	}
@@ -218,26 +218,6 @@ class Boot {
 						return __this__.arr[__this__.cur++];
 					}
 				}
-			};
-			if( String.prototype.cca == null )
-				String.prototype.cca = String.prototype.charCodeAt;
-			String.prototype.charCodeAt = function(i) {
-				var x = __this__.cca(i);
-				if( x != x ) // fast isNaN
-					return __js__('undefined'); // isNaN will still return true
-				return x;
-			};
-			var oldsub = String.prototype.substr;
-			String.prototype.substr = function(pos,len){
-				if( pos != null && pos != 0 && len != null && len < 0 ) return "";
-				if( len == null ) len = __this__.length;
-				if( pos < 0 ){
-					pos = __this__.length + pos;
-					if( pos < 0 ) pos = 0;
-				}else if( len < 0 ){
-					len = __this__.length + len - pos;
-				}
-				return oldsub.apply(__this__,[pos,len]);
 			};
 			Function.prototype["$bind"] = function(o){
 				var f = function(){

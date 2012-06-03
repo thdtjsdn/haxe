@@ -55,7 +55,7 @@
 		return new1(neko.NativeArray.sub(this.__a,0,this.length),this.length);
 	}
 
-	public function iterator() : Iterator<Null<T>> {
+	public function iterator() : Iterator<T> {
 		return untyped {
 			a : this,
 			p : 0,
@@ -102,7 +102,7 @@
 		for( i in it ) {
 			s.add(i);
 			if( it.hasNext() )
-				s.add(", ");
+				s.addChar(",".code);
 		}
 		s.add("]");
 		return s.toString();

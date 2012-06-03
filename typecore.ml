@@ -36,9 +36,14 @@ type macro_mode =
 	| MBuild
 	| MMacroType
 
+type feature =
+	| FtTypedCast
+	| FtTypedCatch
+
 type typer_globals = {
 	types_module : (path, path) Hashtbl.t;
 	modules : (path , module_def) Hashtbl.t;
+	features : (string, feature) Hashtbl.t;
 	mutable delayed : (unit -> unit) list;
 	doinline : bool;
 	mutable core_api : typer option;
@@ -97,6 +102,8 @@ type error_msg =
 exception Error of error_msg * pos
 
 let type_expr_ref : (typer -> Ast.expr -> bool -> texpr) ref = ref (fun _ _ _ -> assert false)
+let unify_min_ref : (typer -> texpr list -> t) ref = ref (fun _ _ -> assert false)
+let type_expr_with_type_ref : (typer -> Ast.expr -> t option -> bool -> texpr) ref = ref (fun _ _ _ -> assert false)
 
 let unify_error_msg ctx = function
 	| Cannot_unify (t1,t2) ->
@@ -105,6 +112,8 @@ let unify_error_msg ctx = function
 		"Invalid type for field " ^ s ^ " :"
 	| Has_no_field (t,n) ->
 		s_type ctx t ^ " has no field " ^ n
+	| Has_no_runtime_field (t,n) ->
+		s_type ctx t ^ "." ^ n ^ " is not accessible at runtime"
 	| Has_extra_field (t,n) ->
 		s_type ctx t ^ " has extra field " ^ n
 	| Invalid_kind (f,a,b) ->
@@ -147,6 +156,10 @@ let display_error ctx msg p = ctx.com.error msg p
 let error msg p = raise (Error (Custom msg,p))
 
 let type_expr ctx e need_val = (!type_expr_ref) ctx e need_val
+
+let unify_min ctx el = (!unify_min_ref) ctx el
+
+let type_expr_with_type ctx e t do_raise = (!type_expr_with_type_ref) ctx e t do_raise
 
 let unify ctx t1 t2 p =
 	try
@@ -211,6 +224,7 @@ let mk_field name t p = {
 	cf_kind = Var { v_read = AccNormal; v_write = AccNormal };
 	cf_expr = None;
 	cf_params = [];
+	cf_overloads = [];
 }
 
 let fake_modules = Hashtbl.create 0
@@ -228,3 +242,10 @@ let create_fake_module ctx file =
 	) in
 	Hashtbl.replace ctx.g.modules mdep.m_path mdep;
 	mdep
+
+let feature_name = function
+	| FtTypedCast -> "typed_cast"
+	| FtTypedCatch -> "typed_catch"
+
+let activate_feature ctx ft = Hashtbl.replace ctx.g.features (feature_name ft) ft
+let has_feature ctx s = Hashtbl.mem ctx.g.features s

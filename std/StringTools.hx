@@ -30,6 +30,9 @@
 	the standard [String] of being bloated and thus increasing the size of
 	each application using it.
 **/
+#if java
+@:SuppressWarnings("deprecation")
+#end
 class StringTools {
 
 	/**
@@ -296,6 +299,8 @@ class StringTools {
 			return 0;
 		else
 			return cast(untyped s[index], Int);
+		#elseif js
+		return (untyped s).charCodeAt(index);
 		#else
 		return s.cca(index);
 		#end

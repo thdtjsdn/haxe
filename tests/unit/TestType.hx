@@ -95,7 +95,6 @@ class TestType extends Test {
 		
 		var mc2 = new MyChild2();
 		eq(21, mc2.test1(new MyChild1()));
-		eq(19, mc2.test2(new MyChild1()));
 	}
 	
 	function testUnifyMin() {
@@ -118,7 +117,7 @@ class TestType extends Test {
 		
 		typedAs([new Child1(), new Child2()], tbase);
 		typedAs([new Child1(), new Child2(), new Base()], tbase);
-		typedAs([new Child1(), new Child2_1(), new Base()], tbase);	
+		typedAs([new Child1(), new Child2_1(), new Base()], tbase);
 		typedAs([new Child2(), new Unrelated()], ti1);
 		typedAs([new Child2_1(), new Unrelated()], ti1);
 
@@ -180,6 +179,8 @@ class TestType extends Test {
 		typedAs(switch(false) { case true: new Unrelated(); default: {s:"foo"}; }, ts);
 		typedAs(switch(false) { case true: { s:"foo" }; default: new Unrelated(); }, ts);
 		
+		typedAs([ { x : new Child1() }, { x : new Child2() } ], [{ x: new Base() }]);
+		
 		#if flash9
 		typedAs(function() { return 0; var v:UInt = 0; return v; } (), 1);
 		#end
@@ -197,8 +198,8 @@ class TestType extends Test {
 		var tvoid = function() return 0;
 		var tintstring = function(a:Int, b:String) return 0;
 		var tintfloat = function(a:Int, c:Float) return 0;
-		var tint = function(a:Int) return 0;	
-		var tstring = function(b:String) return 0;	
+		var tint = function(a:Int) return 0;
+		var tstring = function(b:String) return 0;
 
 		// all missing
 		
@@ -271,6 +272,7 @@ class TestType extends Test {
 	function testConstantAnonCovariance()
 	{
 		#if !macro
+		var func = function (str:String, ?str1: { x:Float, y:Int }, ?str2: { w:Float, h:Int } ) { };
 		var a: { v:Float };
 		var b:Dynamic = "bar";
 		f(typeError(a = { v:0.2 } ));
@@ -285,6 +287,10 @@ class TestType extends Test {
 		t(typeError( { var b: { v:Int } = { v:0, w:"foo" }; }));
 		t(typeError( { var b: { v:Int } = { v:0, v:2 }; } ));
 		t(typeError( { var b: { v:Int, w:String } = { v:0 }; } ));
+		typedAs({ v: 0.2, " foo":2 }, a);
+		t(typeError(a = { v:0, " foo":2 } ));
+		f(typeError(func("foo", { x:1.2, y:2 } )));
+		f(typeError(func("foo", { w:1.2, h:2 } )));
 		#end
 	}
 	
