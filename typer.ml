@@ -438,11 +438,12 @@ let rec acc_get ctx g p =
 			else
 				error "Recursive inline is not supported" p
 		| Some { eexpr = TFunction _ } ->
-			let chk_class c = if c.cl_extern || has_meta ":extern" f.cf_meta then display_error ctx "Can't create closure on an inline extern method" p in
+			let chk_class c = if (c.cl_extern || has_meta ":extern" f.cf_meta) && not (has_meta ":runtime" f.cf_meta) then display_error ctx "Can't create closure on an inline extern method" p in
 			(match follow e.etype with
 			| TInst (c,_) -> chk_class c
 			| TAnon a -> (match !(a.a_status) with Statics c -> chk_class c | _ -> ())
 			| _ -> ());
+			mark_used_field ctx f;
 			mk (TClosure (e,f.cf_name)) t p
 		| Some e ->
 			let rec loop e = Type.map_expr loop { e with epos = p } in
@@ -476,7 +477,9 @@ let field_access ctx mode f t e p =
 		| MethInline, _ -> AKInline (e,f,t)
 		| MethMacro, MGet -> display_error ctx "Macro functions must be called immediatly" p; normal()
 		| MethMacro, MCall -> AKMacro (e,f)
-		| _ , MGet -> AKExpr (mk (TClosure (e,f.cf_name)) t p)
+		| _ , MGet ->
+			mark_used_field ctx f;
+			AKExpr (mk (TClosure (e,f.cf_name)) t p)
 		| _ -> normal())
 	| Var v ->
 		match (match mode with MGet | MCall -> v.v_read | MSet -> v.v_write) with
@@ -2041,7 +2044,12 @@ and type_call ctx e el t p =
 		else
 		let params = (match el with [] -> [] | _ -> ["customParams",(EArrayDecl el , p)]) in
 		let infos = mk_infos ctx p params in
-		type_expr ctx (ECall ((EField ((EField ((EConst (Ident "haxe"),p),"Log"),p),"trace"),p),[e;EUntyped infos,p]),p)
+		if platform ctx.com Js && el = [] then
+			let e = type_expr ctx e in	
+			let infos = type_expr ctx infos in
+			mk (TCall (mk (TLocal (alloc_var "`trace" t_dynamic)) t_dynamic p,[e;infos])) ctx.t.tvoid p
+		else
+			type_expr ctx (ECall ((EField ((EField ((EConst (Ident "haxe"),p),"Log"),p),"trace"),p),[e;EUntyped infos,p]),p)
 	| (EConst (Ident "callback"),p) , e :: params ->
 		type_callback ctx e params p
 	| (EConst (Ident "$type"),_) , [e] ->
@@ -2178,7 +2186,7 @@ let dce_check_metadata ctx meta =
 	) meta
 
 let dce_check_class ctx c =
-	let keep_whole_class = c.cl_interface || has_meta ":keep" c.cl_meta || (match c.cl_path with ["php"],"Boot" | ["neko"],"Boot" | ["flash"],"Boot" | [],"Array" | [],"String" -> true | _ -> false)  in
+	let keep_whole_class = c.cl_interface || has_meta ":keep" c.cl_meta || (match c.cl_path with ["php"],"Boot" | ["neko"],"Boot" | ["flash"],"Boot" | [],"Array" | [],"String" -> not (platform ctx.com Js) | _ -> false)  in
 	let keep stat f =
 		keep_whole_class
 		|| (c.cl_extern && (match f.cf_kind with Method MethInline -> false | _ -> true))
@@ -2187,10 +2195,8 @@ let dce_check_class ctx c =
 		|| (not stat && f.cf_name = "resolve" && (match c.cl_dynamic with Some _ -> true | None -> false))
 		|| (f.cf_name = "new" && has_meta ":?used" c.cl_meta)
 		|| match String.concat "." (fst c.cl_path @ [snd c.cl_path;f.cf_name]) with
-		| "EReg.new"
-		| "js.Boot.__init" | "flash._Boot.RealBoot.new"
-		| "js.Boot.__string_rec" (* used by $estr *)
-			-> true
+		| "EReg.new" -> true
+		| "flash._Boot.RealBoot.new" -> true
 		| _ -> false
 	in
 	keep
@@ -2237,7 +2243,7 @@ let dce_optimize ctx =
 			| _ ->
 				Common.log ctx.com ("Removing " ^ s_type_path c.cl_path);
 				c.cl_extern <- true;
-				(match c.cl_path with [],"Std" -> () | _ -> c.cl_init <- None);
+				(match c.cl_path with [],"Std"|["js"],"Boot" -> () | _ -> c.cl_init <- None);
 				c.cl_meta <- [":native",[(EConst (String "Dynamic"),c.cl_pos)],c.cl_pos]; (* make sure the type will not be referenced *)
 	in
 	Common.log ctx.com "Performing dead code optimization";
