@@ -42,9 +42,13 @@ libs:
 haxe: $(MODULES:=.cmx)
 	$(OCAMLOPT) -o $(OUTPUT) $(NATIVE_LIBS) $(LIBS) $(MODULES:=.cmx)
 
-tools:
-	(cd std/tools/haxedoc && haxe haxedoc.hxml && cp haxedoc ../../..)
-	(cd std/tools/haxelib && haxe haxelib.hxml && cp haxelib ../../..)
+haxelib:
+	(cd std/tools/haxelib && ../../../$(OUTPUT) haxelib.hxml && cp haxelib ../../..)
+
+haxedoc:
+	(cd std/tools/haxedoc && ../../../$(OUTPUT) haxedoc.hxml && cp haxedoc ../../..)
+
+tools: haxelib haxedoc
 
 export:
 	cp haxe*.exe doc/CHANGES.txt $(EXPORT)
@@ -112,6 +116,7 @@ clean_libs:
 
 clean_haxe:
 	rm -f $(MODULES:=.obj) $(MODULES:=.o) $(MODULES:=.cmx) $(MODULES:=.cmi) lexer.ml
+	rm -f $(OUTPUT) haxelib haxedoc
 
 # SUFFIXES
 .ml.cmx:
