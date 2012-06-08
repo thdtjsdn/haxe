@@ -40,6 +40,16 @@ type context = {
 	mutable constructor_block : bool;
 }
 
+let is_var_field e v =
+	match e.eexpr, follow e.etype with
+	| TTypeExpr (TClassDecl c),_
+	| _,TInst(c,_) ->
+		(try
+			let f = try PMap.find v c.cl_fields	with Not_found -> PMap.find v c.cl_statics in
+			(match f.cf_kind with Var _ -> true | _ -> false)
+		with Not_found -> false)
+	| _ -> false
+
 let protect name =
 	match name with
 	| "Error" | "Namespace" -> "_" ^ name
@@ -407,6 +417,13 @@ let rec gen_call ctx e el r =
 				print ctx ")";
 			| _ -> assert false)
 		| _ -> assert false)
+	| TField(ee,v),args when is_var_field ee v ->
+		spr ctx "(";
+		gen_value ctx e;
+		spr ctx ")";
+		spr ctx "(";
+		concat ctx "," (gen_value ctx) el;
+		spr ctx ")"	
 	| _ ->
 		gen_value ctx e;
 		spr ctx "(";
@@ -885,7 +902,13 @@ let generate_field ctx static f =
 		if ctx.curclass.cl_interface then
 			match follow f.cf_type with
 			| TFun (args,r) ->
-				print ctx "function %s(" f.cf_name;
+				let rec loop = function
+					| [] -> f.cf_name
+					| (":getter",[Ast.EConst (Ast.String name),_],_) :: _ -> "get " ^ name
+					| (":setter",[Ast.EConst (Ast.String name),_],_) :: _ -> "set " ^ name
+					| _ :: l -> loop l
+				in
+				print ctx "function %s(" (loop f.cf_meta);
 				concat ctx "," (fun (arg,o,t) ->
 					let tstr = type_str ctx t p in
 					print ctx "%s : %s" arg tstr;
