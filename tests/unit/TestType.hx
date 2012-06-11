@@ -345,6 +345,9 @@ class TestType extends Test {
 		eq(c.i, 2);
 		eq(c.s, "foo");
 		eq(c.b, true);
+		t(c.a[0]);
+		f(c.a[1]);
+		eq(c.complex, 25);
 		
 		var c = new InitChild();
 		eq(c.i, 2);
@@ -367,5 +370,18 @@ class TestType extends Test {
 		eq(c.accNever, 3);
 		eq(c.accDynamic, 3);
 		exc(function() c.accFunc = 4);
+	}
+	
+	function testReturnFlow()
+	{
+		var l = function():String
+		{
+			while (true)
+			{
+				return "foo";
+			}
+			// some platforms may have to add an implicit return null here
+		}
+		eq(l(), "foo");
 	}
 }

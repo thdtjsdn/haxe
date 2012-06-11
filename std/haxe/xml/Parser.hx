@@ -33,7 +33,7 @@ class Parser
 		return doc;
 	}
 	
-	static function doParse(str:String, ?p:Int = 0, ?parent:Xml):Int
+	static function doParse(str:String, p:Int = 0, ?parent:Xml):Int
 	{
 		var xml:Xml = null;
 		var state = S.BEGIN;

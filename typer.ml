@@ -580,7 +580,7 @@ let get_this ctx p =
 	| FConstructor | FMember ->
 		mk (TConst TThis) ctx.tthis p
 
-let type_ident ?(imported_enums=true) ctx i p mode =
+let type_ident_raise ?(imported_enums=true) ctx i p mode =
 	match i with
 	| "true" ->
 		if mode = MGet then
@@ -623,7 +623,21 @@ let type_ident ?(imported_enums=true) ctx i p mode =
 	| _ ->
 	try
 		let v = PMap.find i ctx.locals in
-		AKExpr (mk (TLocal v) v.v_type p)
+		(match v.v_extra with
+		| Some (params,e) ->
+			let t = monomorphs params v.v_type in
+			(match e with
+			| Some ({ eexpr = TFunction f } as e) ->
+				(* create a fake class with a fake field to emulate inlining *)
+				let c = mk_class ctx.current (["local"],v.v_name) e.epos in
+				let cf = { (mk_field v.v_name v.v_type e.epos) with cf_params = params; cf_expr = Some e; cf_kind = Method MethInline } in				
+				c.cl_extern <- true;
+				c.cl_fields <- PMap.add cf.cf_name cf PMap.empty;
+				AKInline (mk (TConst TNull) (TInst (c,[])) p, cf, t)
+			| _ -> 
+				AKExpr (mk (TLocal v) t p))
+		| _ -> 
+			AKExpr (mk (TLocal v) v.v_type p))
 	with Not_found -> try
 		(* member variable lookup *)
 		if ctx.curfun = FStatic then raise Not_found;
@@ -699,6 +713,23 @@ let rec type_field ctx e i p mode =
 			using_field ctx mode e i p
 		with Not_found -> try
 			loop_dyn c params
+		with Not_found -> try
+			(* if any class in the tree has @:resolve metadata, call the corresponding macro *)
+			let rec loop c =
+				try
+					let epath = match List.filter (fun (m,_,_) -> m = ":resolve") c.cl_meta with
+						| [] -> raise Not_found
+						| (_,[e],_) :: [] -> Typeload.string_list_of_expr_path e
+						| _ -> error ("Argument to @:resolve must be a Expr->String->Expr macro") c.cl_pos
+					in
+					let s = String.concat "." (List.rev epath) in
+					(match Typeload.apply_macro ctx MExpr s [Interp.make_ast e;EConst (String i),p] p with
+					| Some e -> AKExpr (type_expr ctx e true)
+					| None -> raise Not_found)
+				with Not_found ->
+					(match c.cl_super with None -> raise Not_found | Some (csup,_) -> loop csup)
+			in
+			loop c;
 		with Not_found ->
 			if PMap.mem i c.cl_statics then error ("Cannot access static field " ^ i ^ " from a class instance") p;
 			(*
@@ -1327,9 +1358,9 @@ and type_switch ctx e cases def need_val with_type p =
 		let t = if not need_val then (mk_mono()) else unify_min ctx !el in
 		mk (TSwitch (eval,cases,def)) t p
 
-and type_ident_noerr ctx i p mode =
+and type_ident ctx i p mode =
 	try
-		type_ident ctx i p mode
+		type_ident_raise ctx i p mode
 	with Not_found -> try
 		(* lookup type *)
 		if is_lower_ident i then raise Not_found;
@@ -1406,7 +1437,7 @@ and type_expr_with_type_raise ctx e t =
 		mk (TBlock l) (loop l) p
 	| EConst (Ident s) ->
 		(try
-			acc_get ctx (type_ident ~imported_enums:false ctx s p MGet) p
+			acc_get ctx (type_ident_raise ~imported_enums:false ctx s p MGet) p
 		with Not_found -> try
 			(match t with
 			| None -> raise Not_found
@@ -1499,7 +1530,7 @@ and type_expr_with_type ctx e t =
 and type_access ctx e p mode =
 	match e with
 	| EConst (Ident s) ->
-		type_ident_noerr ctx s p mode
+		type_ident ctx s p mode
 	| EField _ ->
 		let fields path e =
 			List.fold_left (fun e (f,_,p) ->
@@ -1587,7 +1618,7 @@ and type_access ctx e p mode =
 			| [] -> assert false
 			| (name,_,p) :: pnext ->
 				try
-					fields pnext (fun _ -> type_ident ctx name p MGet)
+					fields pnext (fun _ -> type_ident_raise ctx name p MGet)
 				with
 					Not_found -> loop [] path
 		in
@@ -1860,6 +1891,9 @@ and type_expr ctx ?(need_val=true) (e,p) =
 	| EUnop (op,flag,e) ->
 		type_unop ctx op flag e p
 	| EFunction (name,f) ->
+		let params = Typeload.type_function_params ctx f "localfun" [] p in
+		let old = ctx.type_params in
+		ctx.type_params <- params @ ctx.type_params;
 		let rt = Typeload.load_type_opt ctx p f.f_type in
 		let args = List.map (fun (s,opt,t,c) ->
 			let t = Typeload.load_type_opt ctx p t in
@@ -1879,20 +1913,23 @@ and type_expr ctx ?(need_val=true) (e,p) =
 				) args args2;
 			| _ -> ());
 		let ft = TFun (fun_args args,rt) in
-		let vname = (match name with
-			| None -> None
-			| Some v -> Some (add_local ctx v ft)
+		let inline, v = (match name with
+			| None -> false, None
+			| Some v when ExtString.String.starts_with v "inline_" -> true, Some (add_local ctx (String.sub v 7 (String.length v - 7)) ft)
+			| Some v -> false, Some (add_local ctx v ft)
 		) in
 		let e , fargs = Typeload.type_function ctx args rt (match ctx.curfun with FStatic -> FStatic | _ -> FMemberLocal) f p in
+		ctx.type_params <- old;
 		let f = {
 			tf_args = fargs;
 			tf_type = rt;
 			tf_expr = e;
 		} in
 		let e = mk (TFunction f) ft p in
-		(match vname with
+		(match v with
 		| None -> e
 		| Some v ->
+			if params <> [] || inline then v.v_extra <- Some (params,if inline then Some e else None);
 			let rec loop = function
 				| Codegen.Block f | Codegen.Loop f | Codegen.Function f -> f loop
 				| Codegen.Use v2 when v == v2 -> raise Exit
@@ -1900,13 +1937,16 @@ and type_expr ctx ?(need_val=true) (e,p) =
 			in
 			let is_rec = (try Codegen.local_usage loop e; false with Exit -> true) in
 			if is_rec then begin
+				if inline then display_error ctx "Inline function cannot be recursive" e.epos;
 				let vnew = add_local ctx v.v_name ft in
 				mk (TVars [vnew,Some (mk (TBlock [
 					mk (TVars [v,Some (mk (TConst TNull) ft p)]) ctx.t.tvoid p;
 					mk (TBinop (OpAssign,mk (TLocal v) ft p,e)) ft p;
 					mk (TLocal v) ft p
 				]) ft p)]) ctx.t.tvoid p
-			end else
+			end else if inline then
+				mk (TBlock []) ctx.t.tvoid p (* do not add variable since it will be inlined *)
+			else
 				mk (TVars [v,Some e]) ctx.t.tvoid p)
 	| EUntyped e ->
 		let old = ctx.untyped in

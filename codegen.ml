@@ -450,7 +450,7 @@ let on_inherit ctx c p h =
 		extend_remoting ctx c t p true false;
 		false
 	| HImplements { tpackage = ["haxe";"rtti"]; tname = "Generic"; tparams = [] } ->
-		c.cl_kind <- KGeneric;
+		if c.cl_types <> [] then c.cl_kind <- KGeneric;
 		false
 	| HExtends { tpackage = ["haxe";"xml"]; tname = "Proxy"; tparams = [TPExpr(EConst (String file),p);TPType t] } ->
 		extend_xml_proxy ctx c t file p;
@@ -465,8 +465,17 @@ let on_inherit ctx c p h =
 	Adds member field initializations as assignments to the constructor
 *)
 let add_field_inits com c =
+	let rec can_init_inline cf e = match com.platform,e.eexpr with
+		(* Flash8 and As3 can init anything (it seems) *)
+		| Flash8, _ -> true
+		| Flash,_ when Common.defined com "as3" -> true
+		(* Php can init literals when the field has no setter *)
+		| Php, TConst _ when (match cf.cf_kind with Var({v_write = AccCall _}) -> false | _ -> true) -> true
+		| _ -> false
+	in
 	let inits = List.filter (fun cf ->
 		match cf.cf_kind,cf.cf_expr with
+		| Var _, Some e when can_init_inline cf e -> false
 		| Var _, Some _ -> true
 		| _ -> false
 	) c.cl_ordered_fields in
@@ -476,9 +485,10 @@ let add_field_inits com c =
 		let ethis = mk (TConst TThis) (TInst (c,List.map snd c.cl_types)) c.cl_pos in
 		let el = List.map (fun cf ->
 			match cf.cf_expr with
-			| None -> assert false 
+			| None -> assert false
 			| Some e ->
 				let lhs = mk (TField(ethis,cf.cf_name)) e.etype e.epos in
+				cf.cf_expr <- None;
 				mk (TBinop(OpAssign,lhs,e)) lhs.etype e.epos
 		) inits in
 		match c.cl_constructor with
@@ -565,6 +575,8 @@ let on_generate ctx t =
 			f.cf_expr <- Some e;
 			c.cl_ordered_statics <- f :: c.cl_ordered_statics;
 			c.cl_statics <- PMap.add f.cf_name f c.cl_statics);
+		(* remove empty @:autoBuild interfaces to avoid duplicate interface problems *)
+		c.cl_implements <- List.filter (fun (c,_) -> not (has_meta ":autoBuild" c.cl_meta) || not (PMap.is_empty c.cl_fields)) c.cl_implements;
 	| TEnumDecl e ->
 		List.iter (fun m ->
 			match m with

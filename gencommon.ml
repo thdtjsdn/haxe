@@ -266,11 +266,9 @@ struct
   let len w = Buffer.length w.sw_buf
   
   let write w x =
-    let t = timer "write contents" in
     (if not w.sw_has_content then begin w.sw_has_content <- true; Buffer.add_string w.sw_buf w.sw_indent; Buffer.add_string w.sw_buf x; end else Buffer.add_string w.sw_buf x);
     let len = (String.length x)-1 in
-    if len >= 0 && String.get x len = '\n' then begin w.sw_has_content <- false end else w.sw_has_content <- true;
-    t()
+    if len >= 0 && String.get x len = '\n' then begin w.sw_has_content <- false end else w.sw_has_content <- true
 
   let push_indent w = w.sw_indents <- "\t"::w.sw_indents; w.sw_indent <- String.concat "" w.sw_indents
 
@@ -789,6 +787,8 @@ let run_filters_from gen t filters =
       | TTypeDecl _ -> ()
 
 let run_filters gen =
+  (* first of all, we have to make sure that the filters won't trigger a major Gc collection *)
+  let t = Common.timer "gencommon_filters" in
   (if Common.defined gen.gcon "gencommon_debug" then debug_mode := true);
   let run_filters filter = 
     let rec loop acc mds =
@@ -840,13 +840,11 @@ let run_filters gen =
     let rec loop processed not_processed =
       match not_processed with
         | hd :: tl ->
-          trace ("type " ^ (snd (t_path hd)));
           let new_hd = filter#run_f hd in
           
           let added_types_new = !added_types in
           added_types := [];
           let added_types = List.map (fun (t,p) -> 
-            trace ("added type " ^ (snd (t_path t)));
             get (filter#run_from p t)
           ) added_types_new in
           
@@ -871,7 +869,8 @@ let run_filters gen =
   gen.gcon.types <- run_filters gen.gsyntax_filters;
   List.iter (fun fn -> fn()) gen.gafter_filters_ended;
   
-  reorder_modules gen
+  reorder_modules gen;
+  t()
 
 (* ******************************************* *)
 (* basic generation module that source code compilation implementations can use *)
@@ -2618,8 +2617,6 @@ struct
         let captured_ht, tparams = get_captured fexpr in
         let captured = Hashtbl.fold (fun _ e acc -> e :: acc) captured_ht [] in
         
-        List.iter (fun e -> trace (debug_expr e)) captured;
-        
         (*let cltypes = List.map (fun cl -> (snd cl.cl_path, TInst(map_param cl, []) )) tparams in*)
         let cltypes = List.map (fun cl -> (snd cl.cl_path, TInst(cl, []) )) tparams in
         
@@ -4144,6 +4141,13 @@ struct
     let do_unsafe_cast () = do_unsafe_cast gen real_from_t real_to_t { e with etype = real_from_t } in
     let to_t, from_t = real_to_t, real_from_t in
     
+    let mk_cast t e =
+      match e.eexpr with
+        (* TThrow is always typed as Dynamic, we just need to type it accordingly *)
+        | TThrow _ -> { e with etype = t }
+        | _ -> mk_cast t e
+    in
+    
     let e = { e with etype = real_from_t } in
     if try fast_eq real_to_t real_from_t with Invalid_argument("List.for_all2") -> false then e else
     match real_to_t, real_from_t with
@@ -5106,6 +5110,17 @@ struct
             let e1 = problematic_expression_unwrap false e1 (expr_kind e1) in
             let e2 = problematic_expression_unwrap false e2 (expr_kind e2) in
             { expr with eexpr = TArray(e1, e2) }
+          (* bugfix: calls should not be transformed into closure calls *)
+          | KExprWithStatement, TCall(( { eexpr = TField (ef_left, f) } as ef ), eargs) ->
+            { expr with eexpr = TCall(
+              { ef with eexpr = TField(problematic_expression_unwrap false ef_left (expr_kind ef_left), f) },
+              List.map (fun e -> problematic_expression_unwrap false e (expr_kind e)) eargs)
+            }
+          | KExprWithStatement, TCall(( { eexpr = TEnumField _ } as ef ), eargs) ->
+            { expr with eexpr = TCall(
+              ef,
+              List.map (fun e -> problematic_expression_unwrap false e (expr_kind e)) eargs)
+            }
           | KExprWithStatement, _ -> Type.map_expr (fun e -> problematic_expression_unwrap false e (expr_kind e)) expr
       in
       problematic_expression_unwrap true expr e_type
@@ -5121,15 +5136,16 @@ struct
               | TVars( (hd1 :: hd2 :: _) as vars ), _ ->
                 List.iter (fun v -> process_statement { e with eexpr = TVars([v]) }) vars
               | _, Statement | _, Both _ ->
+                let e = match e.eexpr with | TReturn (Some ({ eexpr = TThrow _ } as ethrow)) -> ethrow | _ -> e in
                 let kinds = get_kinds e in
                 if has_problematic_expressions kinds then begin
                   match try_call_unwrap_statement gen problematic_expression_unwrap add_statement e with
                     | Some { eexpr = TConst(TNull) } (* no op *) ->
                       ()
                     | Some e -> 
-                      if has_problematic_expressions (get_kinds e) then 
+                      if has_problematic_expressions (get_kinds e) then begin
                         process_statement e
-                      else
+                      end else
                         new_block := (traverse e) :: !new_block
                     | None ->
                     (
@@ -5138,9 +5154,9 @@ struct
                         match !acc with
                           | hd :: tl ->
                             acc := tl;
-                            if has_problematic_expressions (hd :: tl) then 
+                            if has_problematic_expressions (hd :: tl) then begin
                               problematic_expression_unwrap add_statement e hd
-                            else
+                            end else
                               e
                           | [] -> assert false
                       ) e in
@@ -8086,7 +8102,35 @@ struct
           (match op with
             | Ast.OpAssign
             | Ast.OpAssignOp _ ->
-              Type.map_expr run e (* casts are already dealt with normal CastDetection module *)
+              (match e1_t, e2_t with
+                | Some t1, Some t2 ->
+                  (match op with
+                    | Ast.OpAssign -> 
+                      { e with eexpr = TBinop( op, run e1, handle_wrap ( handle_unwrap t2 (run e2) ) t1 ) }
+                    | Ast.OpAssignOp op ->
+                      (match e1.eexpr with
+                        | TLocal _ ->
+                          { e with eexpr = TBinop( Ast.OpAssign, e1, handle_wrap { e with eexpr = TBinop (op, handle_unwrap t1 e1, handle_unwrap t2 (run e2) ) } t1 ) }
+                        | _ ->
+                          let v, e1, evars = match e1.eexpr with
+                            | TField(ef, f) ->
+                              let v = mk_temp gen "nullbinop" ef.etype in
+                              v, { e1 with eexpr = TField(mk_local v ef.epos, f) }, ef
+                            | _ -> 
+                              let v = mk_temp gen "nullbinop" e1.etype in
+                              v, mk_local v e1.epos, e1
+                          in
+                          { e with eexpr = TBlock([
+                            { eexpr = TVars([v, Some evars ]); etype = gen.gcon.basic.tvoid; epos = e.epos };
+                            { e with eexpr = TBinop( Ast.OpAssign, e1, handle_wrap { e with eexpr = TBinop (op, handle_unwrap t1 e1, handle_unwrap t2 (run e2) ) } t1 ) }
+                          ]) }
+                      )
+                    | _ -> assert false
+                  )
+                  
+                | _ ->
+                  Type.map_expr run e (* casts are already dealt with normal CastDetection module *)
+              )
             | Ast.OpEq | Ast.OpNotEq when not handle_opeq ->
               Type.map_expr run e
             | _ ->
@@ -8276,6 +8320,8 @@ end;;
       in order to not confuse with while break, it will be a special expression __sbreak__
     If the parameter "handle_not_final_returns" is set to true, it will also add final returns when functions are detected to be lacking of them.
       (Will respect __fallback__ expressions)
+    If the parameter "java_mode" is set to true, some additional checks following the java unreachable specs 
+      (http://docs.oracle.com/javase/specs/jls/se7/html/jls-14.html#jls-14.21) will be added
   
   dependencies:
     This must be the LAST syntax filter to run. It expects ExpressionUnwrap to have run correctly, since this will only work for source-code based targets
@@ -8302,7 +8348,23 @@ struct
       | _, BreaksLoop -> BreaksLoop
       | BreaksFunction, BreaksFunction -> BreaksFunction
   
-  let traverse gen should_warn handle_switch_break handle_not_final_returns =
+  let aggregate_constant op c1 c2=
+    match op, c1, c2 with
+      | OpEq, Some v1, Some v2 -> Some (TBool (v1 = v2))
+      | OpNotEq, Some v1, Some v2 -> Some (TBool (v1 <> v2))
+      | OpBoolOr, Some (TBool v1) , Some (TBool v2) -> Some (TBool (v1 || v2))
+      | OpBoolAnd, Some (TBool v1) , Some (TBool v2) -> Some (TBool (v1 && v2))
+      | OpAssign, _, Some v2 -> Some v2
+      | _ -> None
+  
+  let rec get_constant_expr e =
+    match e.eexpr with
+      | TConst (v) -> Some v
+      | TBinop(op, v1, v2) -> aggregate_constant op (get_constant_expr v1) (get_constant_expr v2)
+      | TParenthesis(e) -> get_constant_expr e
+      | _ -> None
+  
+  let traverse gen should_warn handle_switch_break handle_not_final_returns java_mode =
     let basic = gen.gcon.basic in
     
     let do_warn =
@@ -8338,19 +8400,22 @@ struct
       fst
     in
     
+    let has_break = ref false in
+    
     let rec process_expr expr =
       match expr.eexpr with
         | TReturn _ | TThrow _ -> expr, BreaksFunction
-        | TContinue | TBreak -> expr, BreaksLoop
+        | TContinue -> expr, BreaksLoop 
+        | TBreak -> has_break := true; expr, BreaksLoop
         | TCall( { eexpr = TLocal { v_name = "__goto__" } }, _ ) -> expr, BreaksLoop
         
         | TBlock bl ->
           let new_block = ref [] in
-          let is_Unreachable = ref false in
+          let is_unreachable = ref false in
           let ret_kind = ref Normal in
           
           List.iter (fun e ->
-            if !is_Unreachable then
+            if !is_unreachable then
               do_warn e.epos 
             else begin
               let changed_e, kind = process_expr e in
@@ -8358,7 +8423,7 @@ struct
               match kind with
                 | BreaksLoop | BreaksFunction -> 
                   ret_kind := kind;
-                  is_Unreachable := true
+                  is_unreachable := true
                 | _ -> ()
             end
           ) bl;
@@ -8374,19 +8439,48 @@ struct
           
           { expr with eexpr = TFunction({ tf with tf_expr = changed }) }, Normal
         | TFor(var, cond, block) ->
+          let last_has_break = !has_break in
+          has_break := false;
+          
           let changed_block, kind = process_expr block in
+          has_break := last_has_break;
           let expr = { expr with eexpr = TFor(var, cond, changed_block) } in
           return_loop expr kind
         | TIf(cond, eif, None) ->
-          { expr with eexpr = TIf(cond, fst (process_expr eif), None) }, Normal
+          if java_mode then
+            match get_constant_expr cond with
+              | Some (TBool true) ->
+                process_expr eif
+              | _ ->
+                { expr with eexpr = TIf(cond, fst (process_expr eif), None) }, Normal
+          else
+            { expr with eexpr = TIf(cond, fst (process_expr eif), None) }, Normal
         | TIf(cond, eif, Some eelse) ->
           let eif, eif_k = process_expr eif in
           let eelse, eelse_k = process_expr eelse in
           let k = aggregate_kind eif_k eelse_k in
           { expr with eexpr = TIf(cond, eif, Some eelse) }, k
         | TWhile(cond, block, flag) ->
+          let last_has_break = !has_break in
+          has_break := false;
+          
           let block, k = process_expr block in
-          return_loop { expr with eexpr = TWhile(cond,block,flag) } k
+          if java_mode then
+            match get_constant_expr cond, !has_break with
+              | Some (TBool true), false -> 
+                has_break := last_has_break;
+                { expr with eexpr = TWhile(cond, block, flag) }, BreaksFunction
+              | Some (TBool false), _ ->
+                has_break := last_has_break;
+                do_warn expr.epos;
+                null expr.etype expr.epos, k
+              | _ ->
+                has_break := last_has_break;
+                return_loop { expr with eexpr = TWhile(cond,block,flag) } k
+          else begin
+            has_break := last_has_break;
+            return_loop { expr with eexpr = TWhile(cond,block,flag) } k
+          end
         | TSwitch(cond, el_e_l, None) ->
           { expr with eexpr = TSwitch(cond, List.map (fun (el, e) -> (el, handle_case (process_expr e))) el_e_l, None) }, Normal
         | TSwitch(cond, el_e_l, Some def) ->

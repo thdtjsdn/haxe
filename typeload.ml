@@ -495,6 +495,15 @@ let rec return_flow ctx e =
 	| TTry (e,cases) ->
 		return_flow e;
 		List.iter (fun (_,e) -> return_flow e) cases;
+	| TWhile({eexpr = (TConst (TBool true))},e,_) ->
+		(* a special case for "inifite" while loops that have no break *)
+		let rec loop e = match e.eexpr with
+			(* ignore nested loops to not accidentally get one of its breaks *)
+			| TWhile _ | TFor _ -> ()
+			| TBreak -> error()
+			| _ -> Type.iter loop e
+		in
+		loop e
 	| _ ->
 		error()
 
@@ -580,6 +589,38 @@ let type_type_params ctx path get_params p (n,flags) =
 		) in
 		delay ctx (fun () -> ignore(!r()));
 		n, TLazy r
+
+let type_function_params ctx fd fname fmeta p =
+	let params = ref [] in
+	params := List.map (fun (n,flags) ->
+		(match flags with
+		| [] -> ()
+		| _ ->
+			(** look if the type is contained into arguments **)
+			let rec lookup_type t =
+				match t with
+				| CTPath { tpackage = []; tname = n2 } when n = n2 -> true
+				| CTPath p -> List.exists lookup_tparam p.tparams
+				| CTFunction (cl,r) -> List.exists lookup_type (r::cl)
+				| CTExtend (_,fl) | CTAnonymous fl -> List.exists lookup_cfield fl
+				| CTOptional t | CTParent t -> lookup_type t						
+			and lookup_cfield f =
+				match f.cff_kind with
+				| FVar (None,_) -> false
+				| FProp (_,_,t,_) | FVar (Some t,_) -> lookup_type t
+				| FFun f -> lookup_fun f
+			and lookup_fun f =
+				List.exists (fun (_,_,t,_) -> match t with None -> false | Some t -> lookup_type t) f.f_args || 
+				List.exists (fun (_,tl) -> List.exists lookup_type tl) f.f_params ||
+				(match f.f_type with None -> false | Some t -> lookup_type t)
+			and lookup_tparam = function
+				| TPType t -> lookup_type t
+				| TPExpr _ -> false
+			in
+			if lookup_fun { fd with f_type = None; f_params = [] } && not (has_meta ":allowConstraint" fmeta) then error "This notation is not allowed because it can't be checked" p);
+		type_type_params ctx ([],fname) (fun() -> !params) p (n,flags)
+	) fd.f_params;
+	!params
 
 let type_function ctx args ret fmode f p =
 	let locals = save_locals ctx in
@@ -750,6 +791,12 @@ let patch_class ctx c fields =
 		in
 		List.rev (loop [] fields)
 
+let rec string_list_of_expr_path (e,p) = 
+	match e with
+	| EConst (Ident i) -> [i]
+	| EField (e,f) -> f :: string_list_of_expr_path e
+	| _ -> error "Invalid path" p
+
 let build_module_def ctx mt meta fvars fbuild =
 	let rec loop = function
 		| (":build",args,p) :: l ->
@@ -757,13 +804,7 @@ let build_module_def ctx mt meta fvars fbuild =
 				| [ECall (epath,el),p] -> epath, el
 				| _ -> error "Invalid build parameters" p
 			) in
-			let rec getpath (e,p) =
-				match e with
-				| EConst (Ident i) -> [i]
-				| EField (e,f) -> f :: getpath e
-				| _ -> error "Build call parameter must be a class path" p
-			in
-			let s = String.concat "." (List.rev (getpath epath)) in
+			let s = try String.concat "." (List.rev (string_list_of_expr_path epath)) with Error (_,p) -> error "Build call parameter must be a class path" p in
 			if ctx.in_macro then error "You cannot used :build inside a macro : make sure that your enum is not used in macro" p;
 			let old = ctx.g.get_build_infos in
 			ctx.g.get_build_infos <- (fun() -> Some (mt, fvars()));
@@ -971,36 +1012,7 @@ let init_class ctx c p herits fields =
 			let delay = bind_var ctx cf e stat inline in
 			f, false, cf, delay
 		| FFun fd ->
-			let params = ref [] in
-			params := List.map (fun (n,flags) ->
-				(match flags with
-				| [] -> ()
-				| _ ->
-					(** look if the type is contained into arguments **)
-					let rec lookup_type t =
-						match t with
-						| CTPath { tpackage = []; tname = n2 } when n = n2 -> true
-						| CTPath p -> List.exists lookup_tparam p.tparams
-						| CTFunction (cl,r) -> List.exists lookup_type (r::cl)
-						| CTExtend (_,fl) | CTAnonymous fl -> List.exists lookup_cfield fl
-						| CTOptional t | CTParent t -> lookup_type t						
-					and lookup_cfield f =
-						match f.cff_kind with
-						| FVar (None,_) -> false
-						| FProp (_,_,t,_) | FVar (Some t,_) -> lookup_type t
-						| FFun f -> lookup_fun f
-					and lookup_fun f =
-						List.exists (fun (_,_,t,_) -> match t with None -> false | Some t -> lookup_type t) f.f_args || 
-						List.exists (fun (_,tl) -> List.exists lookup_type tl) f.f_params ||
-						(match f.f_type with None -> false | Some t -> lookup_type t)
-					and lookup_tparam = function
-						| TPType t -> lookup_type t
-						| TPExpr _ -> false
-					in
-					if lookup_fun { fd with f_type = None; f_params = [] } && not (has_meta ":allowConstraint" f.cff_meta) then error "This notation is not allowed because it can't be checked" p);
-				type_type_params ctx ([],name) (fun() -> !params) p (n,flags)
-			) fd.f_params;
-			let params = !params in
+			let params = type_function_params ctx fd f.cff_name f.cff_meta p in
 			if inline && c.cl_interface then error "You can't declare inline methods in interfaces" p;
 			let is_macro = (is_macro && stat) || has_meta ":macro" f.cff_meta in
 			let f, stat, fd = if not is_macro || stat then
@@ -1209,15 +1221,28 @@ let init_class ctx c p herits fields =
 			(match csup.cl_constructor with
 			| None -> ()
 			| Some cf ->
-				let args = (match follow (apply_params csup.cl_types cparams cf.cf_type) with
-					| TFun (args,_) -> args
-					| _ -> assert false
+				ignore (follow cf.cf_type); (* make sure it's typed *)
+				let args = (match cf.cf_expr with
+					| Some { eexpr = TFunction f } -> 
+						List.map (fun (v,def) -> 
+							(*
+								let's optimize a bit the output by not always copying the default value 
+								into the inherited constructor when it's not necessary for the platform
+							*)
+							match ctx.com.platform, def with
+							| (Php | Js | Neko | Flash8), Some _ -> v, (Some TNull)
+							| Flash, Some (TString _) -> v, (Some TNull)
+							| Cpp, Some (TString _) -> v, def
+							| Cpp, Some _ -> { v with v_type = ctx.t.tnull v.v_type }, (Some TNull)
+							| _ -> v, def
+						) f.tf_args
+					| _ ->
+						match follow cf.cf_type with
+						| TFun (args,_) -> List.map (fun (n,o,t) -> alloc_var n t, if o then Some TNull else None) args
+						| _ -> assert false
 				) in
 				let p = c.cl_pos in
-				let vars = List.map (fun (n,o,t) ->
-					let t = if o then ctx.t.tnull t else t in
-					alloc_var n t, (if o then Some TNull else None)
-				) args in
+				let vars = List.map (fun (v,def) -> alloc_var v.v_name (apply_params csup.cl_types cparams v.v_type), def) args in
 				let super_call = mk (TCall (mk (TConst TSuper) (TInst (csup,cparams)) p,List.map (fun (v,_) -> mk (TLocal v) v.v_type p) vars)) ctx.t.tvoid p in
 				let constr = mk (TFunction {
 					tf_args = vars;
