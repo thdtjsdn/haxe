@@ -267,6 +267,16 @@ class TestType extends Test {
 		var foo = function ( x : Int, ?p : haxe.PosInfos ) { return "foo" + x; }
 		var f : Void -> String = callback(foo, 0);
  		eq("foo0", f());
+
+		// TODO: this fails on flash 9
+		var foo = function(bar = 2) { return bar; };
+		var l = callback(foo, _);
+		eq(2, l());
+		
+		// note that this does not
+		var foo = function(bar:Null<Int> = 2) { return bar; };
+		var l = callback(foo, _);
+		eq(2, l());		
 	}
 	
 	function testConstantAnonCovariance()
@@ -348,6 +358,7 @@ class TestType extends Test {
 		t(c.a[0]);
 		f(c.a[1]);
 		eq(c.complex, 25);
+		eq(c.newInit.get(), 12);
 		
 		var c = new InitChild();
 		eq(c.i, 2);
