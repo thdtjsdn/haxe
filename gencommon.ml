@@ -4303,7 +4303,17 @@ struct
           | _ ->
             let ecall = match e with | None -> trace f; trace cf.cf_name; gen.gcon.error "This field should be called immediately" ef.epos; assert false | Some ecall -> ecall in
             match cf.cf_params with
+              | [] when cf.cf_overloads <> [] ->
+                let args, ret = get_args e1.etype in
+                let args, ret = List.map (fun (n,o,t) -> (n,o,gen.greal_type t)) args, gen.greal_type ret in
+                (try
+                  handle_cast gen { ecall with eexpr = TCall({ e1 with eexpr = TField(ef, f) }, List.map2 (fun param (_,_,t) -> handle_cast gen param (gen.greal_type t) (gen.greal_type param.etype)) elist args) } (gen.greal_type ecall.etype) (gen.greal_type ret)
+                with | Invalid_argument("List.map2") ->
+                  gen.gcon.warning "This expression may be invalid" ecall.epos;
+                  handle_cast gen ({ ecall with eexpr = TCall({ e1 with eexpr = TField(ef, f) }, elist )  }) (gen.greal_type ecall.etype) (gen.greal_type ret)
+                )
               | _ when cf.cf_overloads <> [] ->
+                (* this case still needs Issue #915 to be solved, so we will just ignore the need to cast any parameter by now *)
                 mk_cast ecall.etype { ecall with eexpr = TCall({ e1 with eexpr = TField(ef, f) }, elist ) }
               | [] ->
                 let args, ret = get_args actual_t in
@@ -8533,12 +8543,13 @@ end;;
 (*
   
   This Module Filter will go through all defined functions in all modules and change them
-  so they set 
+  so they set all default arguments to be of a Nullable type, and adds the unroll from nullable to
+  the not-nullable type in the beginning of the function.
   
   dependencies:
     Since it depends on no other module filter, but since any function programatically created
     which needs default will only work if added before running DefaultArguments, it's best
-    if we keep as the last 
+    if we keep it as the last 
   
 *)
 
