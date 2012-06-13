@@ -270,8 +270,12 @@ class TestType extends Test {
 
 		// TODO: this fails on flash 9
 		var foo = function(bar = 2) { return bar; };
+		#if flash9
+		t(typeError(callback(foo, _)));
+		#else
 		var l = callback(foo, _);
 		eq(2, l());
+		#end
 		
 		// note that this does not
 		var foo = function(bar:Null<Int> = 2) { return bar; };
@@ -355,10 +359,6 @@ class TestType extends Test {
 		eq(c.i, 2);
 		eq(c.s, "foo");
 		eq(c.b, true);
-		t(c.a[0]);
-		f(c.a[1]);
-		eq(c.complex, 25);
-		eq(c.newInit.get(), 12);
 		
 		var c = new InitChild();
 		eq(c.i, 2);
@@ -369,7 +369,6 @@ class TestType extends Test {
 		eq(c.i, 2);
 		eq(c.s, "foo");
 		eq(c.b, true);
-		eq(c.t, String);
 		
 		var c = Type.createInstance(InitWithoutCtor, []);
 		eq(c.i, 2);
