@@ -472,7 +472,12 @@ let field_access ctx mode f t e p =
 	let fnormal() = AKField ((mk (TField (e,f.cf_name)) t p),f) in
 	let normal() =
 		match follow e.etype with
-		| TAnon a -> (match !(a.a_status) with EnumStatics e -> AKField ((mk (TEnumField (e,f.cf_name)) t p),f) | _ -> fnormal())
+		| TAnon a -> 
+			(match !(a.a_status) with
+			| EnumStatics e -> 
+				mark_used_enum ctx e;
+				AKField ((mk (TEnumField (e,f.cf_name)) t p),f)
+			| _ -> fnormal())
 		| _ -> fnormal()
 	in
 	match f.cf_kind with
@@ -1512,12 +1517,12 @@ and type_expr_with_type_raise ctx e t =
 				) el in
  				let t = (TAnon { a_fields = !fields; a_status = ref Const }) in
 				if not ctx.untyped then begin
+					PMap.iter (fun n cf ->
+							if not (has_meta ":optional" cf.cf_meta) && not (PMap.mem n !fields) then raise (Error (Unify [has_no_field t n],p));
+					) a.a_fields;
 					(match !extra_fields with
 						| [] -> ()
 						| _ -> raise (Error (Unify (List.map (fun n -> has_extra_field t n) !extra_fields),p)));
-					PMap.iter (fun n cf ->
-							if not (has_meta ":optional" cf.cf_meta) && not (PMap.mem n !fields) then raise (Error (Unify [has_no_field t n],p));
-					) a.a_fields
 				end;
 				a.a_status := Closed;
 				mk (TObjectDecl el) t p
@@ -2275,9 +2280,8 @@ let dce_finalize ctx =
 		List.iter (fun t ->
 			match t with
 			| TClassDecl c -> check_class c
-			| TEnumDecl e ->
-				if not (dce_check_metadata ctx e.e_meta) then e.e_extern <- true;
-				if not e.e_extern then add_feature "has_enum";
+			| TEnumDecl e when not e.e_extern && dce_check_metadata ctx e.e_meta ->
+				add_feature "has_enum"
 			| _ -> ()
 		) m.m_types
 	) ctx.g.modules;
@@ -2314,6 +2318,9 @@ let dce_optimize ctx =
 		List.iter (fun t ->
 			match t with
 			| TClassDecl c -> check_class c
+			| TEnumDecl e when not e.e_extern && not (dce_check_metadata ctx e.e_meta) ->
+				e.e_extern <- true;
+				Common.log ctx.com ("Removing " ^ s_type_path e.e_path);
 			| _ -> ()
 		) m.m_types
 	) ctx.g.modules
