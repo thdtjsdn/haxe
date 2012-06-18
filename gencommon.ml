@@ -255,7 +255,7 @@ struct
 
   let new_source_writer () =
     {
-      sw_buf = Buffer.create (1 lsl 14);
+      sw_buf = Buffer.create 0;
       sw_has_content = false;
       sw_indent = "";
       sw_indents = [];
@@ -558,6 +558,8 @@ type generator_ctx =
   (* internal apis *)
   (* param_func_call : used by TypeParams and CastDetection *)
   mutable gparam_func_call : texpr->texpr->tparams->texpr list->texpr;
+  (* does it already have a type parameter cast handler? This is used by CastDetect to know if it should handle type parameter casts *)
+  mutable ghas_tparam_cast_handler : bool;
   (* type parameter casts - special cases *)
   (* function cast_from, cast_to -> texpr *)
   gtparam_cast : (path, (texpr->t->texpr)) Hashtbl.t;
@@ -709,6 +711,7 @@ let new_ctx con =
     
     (* as a default, ignore the params *)
     gparam_func_call = (fun ecall efield params elist -> { ecall with eexpr = TCall(efield, elist) });
+    ghas_tparam_cast_handler = false;
     gtparam_cast = Hashtbl.create 0;
     
     gspecial_vars = Hashtbl.create 0;
@@ -3421,8 +3424,8 @@ struct
   (* this function will receive the original function argument, the applied function argument and the original function parameters. *)
   (* from this info, it will infer the applied tparams for the function *)
   (* this function is used by CastDetection module *)
-  let infer_params gen pos (original_args:((string * bool * t) list * t)) (applied_args:((string * bool * t) list * t)) (params:(string * t) list) : tparams =
-    let args_list args = ( List.map (fun (_,_,t) -> t) (fst args) ) @ [snd args] in
+  let infer_params gen pos (original_args:((string * bool * t) list * t)) (applied_args:((string * bool * t) list * t)) (params:(string * t) list) impossible_tparam_is_dynamic : tparams =
+    let args_list args = ( List.map (fun (_,_,t) -> t) (fst args) ) @ (if impossible_tparam_is_dynamic then [] else [snd args]) in
     let params_tbl = Hashtbl.create (List.length params) in
     
     let pmap_iter2 fn orig_pmap applied_pmap =
@@ -3439,7 +3442,24 @@ struct
         | TInst( ({ cl_kind = KTypeParameter } as cl ), []), _ ->
           Hashtbl.replace params_tbl cl.cl_path applied
         | TInst(cl, params), TInst(cl2, params2) ->
-          List.iter2 (get_arg) params params2
+          let rec loop cl2 params2 =
+            if cl == cl2 then begin
+              List.iter2 (get_arg) params params2;
+              true
+            end else begin
+              if not (cl.cl_interface && List.exists (fun (cs,tls) ->
+                loop cs (List.map (apply_params cl2.cl_types params2) tls)
+              ) cl2.cl_implements) then
+                match cl2.cl_super with
+                  | None -> (* not related ! *) false
+                  | Some (cs,tls) ->
+                    loop cs (List.map (apply_params cl2.cl_types params2) tls)
+              else
+                true
+            end
+          in
+          ignore (loop cl2 params2)
+          
         | TEnum(e, params), TEnum(e2, params2) ->
           List.iter2 (get_arg) params params2
         | TFun(params, ret), TFun(params2, ret2) ->
@@ -3478,6 +3498,8 @@ struct
     
     List.map (fun (_,t) ->
       match follow t with
+        | TInst(cl,_) when impossible_tparam_is_dynamic ->
+          (try Hashtbl.find params_tbl cl.cl_path with | Not_found -> t_empty)
         | TInst(cl,_) ->
           (try Hashtbl.find params_tbl cl.cl_path with | Not_found -> (gen.gcon.error ("Error: function argument " ^ (snd cl.cl_path) ^ " not applied.") pos); assert false)
         | _ -> 
@@ -3859,7 +3881,7 @@ struct
         
         let rec run md =
           match md with 
-            | TClassDecl ({ cl_extern = false; cl_interface = false; cl_types = hd :: tl } as cl) when set_hxgeneric gen md ->
+            | TClassDecl ({ cl_extern = false; cl_types = hd :: tl } as cl) when set_hxgeneric gen md ->
               let iface = mk_class cl.cl_module cl.cl_path cl.cl_pos in
               iface.cl_array_access <- Option.map (apply_params (cl.cl_types) (List.map (fun _ -> t_dynamic) cl.cl_types)) cl.cl_array_access;
               iface.cl_module <- cl.cl_module;
@@ -3921,6 +3943,7 @@ struct
       run
     
     let configure gen traverse =
+      gen.ghas_tparam_cast_handler <- true;
       let map e = Some(traverse e) in
       gen.gsyntax_filters#add ~name:name ~priority:(PCustom priority) map
     
@@ -4063,12 +4086,70 @@ struct
     in
     loop 
   
+  let follow_dyn t = match follow t with
+    | TMono _ | TLazy _ -> t_dynamic
+    | t -> t
+  
+  let rec type_eq gen param a b =
+    if a == b then
+      ()
+    else match follow_dyn (gen.greal_type a) , follow_dyn (gen.greal_type b) with
+    | TEnum (e1,tl1) , TEnum (e2,tl2) ->
+      if e1 != e2 && not (param = EqCoreType && e1.e_path = e2.e_path) then Type.error [cannot_unify a b];
+      List.iter2 (type_eq gen param) tl1 tl2
+    | TInst (c1,tl1) , TInst (c2,tl2) ->
+      if c1 != c2 && not (param = EqCoreType && c1.cl_path = c2.cl_path) && (match c1.cl_kind, c2.cl_kind with KExpr _, KExpr _ -> false | _ -> true) then Type.error [cannot_unify a b];
+      List.iter2 (type_eq gen param) tl1 tl2
+    | TFun (l1,r1) , TFun (l2,r2) when List.length l1 = List.length l2 ->
+      (try
+        type_eq gen param r1 r2;
+        List.iter2 (fun (n,o1,t1) (_,o2,t2) ->
+          if o1 <> o2 then Type.error [Not_matching_optional n];
+          type_eq gen param t1 t2
+        ) l1 l2
+      with
+        Unify_error l -> Type.error (cannot_unify a b :: l))
+    | TDynamic a , TDynamic b ->
+      type_eq gen param a b
+    | TAnon a1, TAnon a2 ->
+      (try
+        PMap.iter (fun n f1 ->
+          try
+            let f2 = PMap.find n a2.a_fields in
+            if f1.cf_kind <> f2.cf_kind && (param = EqStrict || param = EqCoreType || not (unify_kind f1.cf_kind f2.cf_kind)) then Type.error [invalid_kind n f1.cf_kind f2.cf_kind];
+            try
+              type_eq gen param f1.cf_type f2.cf_type
+            with
+              Unify_error l -> Type.error (invalid_field n :: l)
+          with
+            Not_found ->
+              if is_closed a2 then Type.error [has_no_field b n];
+              if not (link (ref None) b f1.cf_type) then Type.error [cannot_unify a b];
+              a2.a_fields <- PMap.add n f1 a2.a_fields
+        ) a1.a_fields;
+        PMap.iter (fun n f2 ->
+          if not (PMap.mem n a1.a_fields) then begin
+            if is_closed a1 then Type.error [has_no_field a n];
+            if not (link (ref None) a f2.cf_type) then Type.error [cannot_unify a b];
+            a1.a_fields <- PMap.add n f2 a1.a_fields
+          end;
+        ) a2.a_fields;
+      with
+        Unify_error l -> Type.error (cannot_unify a b :: l))
+    | _ , _ ->
+      if b == t_dynamic && (param = EqRightDynamic || param = EqBothDynamic) then
+        ()
+      else if a == t_dynamic && param = EqBothDynamic then
+        ()
+      else
+        Type.error [cannot_unify a b]
+  
   (* Helpers for cast handling *)
   (* will return true if 'super' is a superclass of 'cl' or if cl implements super or if they are the same class *)
   let can_be_converted gen cl tl super_t super_tl = 
     map_cls gen (gen.guse_tp_constraints || (not (cl.cl_kind = KTypeParameter || super_t.cl_kind = KTypeParameter))) (fun _ tl ->
       try
-        List.iter2 (type_eq (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) tl super_tl;
+        List.iter2 (type_eq gen (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) tl super_tl;
         true
       with | Unify_error _ -> false
     ) super_t cl tl
@@ -4155,8 +4236,44 @@ struct
       | TInst( { cl_path = ([], "String") }, []), _ ->
         mk_cast to_t e
       | TInst(cl_to, params_to), TInst(cl_from, params_from) ->
-        if can_be_converted gen cl_from params_from cl_to params_to then 
-          e 
+        let ret = ref None in
+        (*
+          this is a little confusing:
+          we are here mapping classes until we have the same to and from classes, applying the type parameters in each step, so we can
+          compare the type parameters;
+          
+          If a class is found - meaning that the cl_from can be converted without a cast into cl_to,
+          we still need to check their type parameters.
+        *)
+        ignore (map_cls gen (gen.guse_tp_constraints || (not (cl_from.cl_kind = KTypeParameter || cl_to.cl_kind = KTypeParameter))) (fun _ tl ->
+          try
+            (* type found, checking type parameters *)
+            List.iter2 (type_eq gen EqStrict) tl params_to;
+            ret := Some e;
+            true
+          with | Unify_error _ -> 
+            (* type parameters need casting *)
+            if gen.ghas_tparam_cast_handler then begin
+              (* 
+                if we are already handling type parameter casts on other part of code (e.g. RealTypeParameters), 
+                we'll just make a cast to indicate that this place needs type parameter-involved casting
+              *)
+              ret := Some (mk_cast to_t e);
+              true
+            end else 
+              (*
+                if not, we're going to check if we only need a simple cast, or if we need to first cast into the dynamic version of it
+              *)
+              try
+                List.iter2 (type_eq gen EqRightDynamic) tl params_to;
+                ret := Some (mk_cast to_t e);
+                true
+              with | Unify_error _ ->
+                ret := Some (mk_cast to_t (mk_cast (TInst(cl_to, List.map (fun _ -> t_dynamic) params_to)) e));
+                true
+        ) cl_to cl_from params_from);
+        if is_some !ret then
+          get !ret
         else if is_cl_related gen cl_from params_from cl_to params_to then 
           mk_cast to_t e 
         else 
@@ -4183,7 +4300,7 @@ struct
           (do_unsafe_cast ())
       | TEnum(e_to, params_to), TEnum(e_from, params_from) when e_to.e_path = e_from.e_path ->
         (try
-            List.iter2 (type_eq (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
+            List.iter2 (type_eq gen (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
             e
           with 
             | Unify_error _ -> do_unsafe_cast ()
@@ -4193,7 +4310,7 @@ struct
         (* this is here for max compatibility with EnumsToClass module *)
         if en.e_path = cl.cl_path && en.e_extern then begin
           (try
-            List.iter2 (type_eq (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
+            List.iter2 (type_eq gen (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
             e
           with 
             | Invalid_argument("List.iter2") ->
@@ -4210,7 +4327,7 @@ struct
       | TType(t_to, params_to), TType(t_from, params_from) when t_to == t_from ->
         if gen.gspecial_needs_cast real_to_t real_from_t then
           (try
-            List.iter2 (type_eq (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
+            List.iter2 (type_eq gen (if gen.gallow_tp_dynamic_conversion then EqRightDynamic else EqStrict)) params_from params_to;
             e
           with 
             | Unify_error _ -> do_unsafe_cast ()
@@ -4255,7 +4372,7 @@ struct
         mk_cast to_t e
       | TFun(args, ret), TFun(args2, ret2) ->
         let get_args = List.map (fun (_,_,t) -> t) in
-        (try List.iter2 (type_eq (EqBothDynamic)) (ret :: get_args args) (ret2 :: get_args args2); e with | Unify_error _ | Invalid_argument("List.iter2") -> mk_cast to_t e)
+        (try List.iter2 (type_eq gen (EqBothDynamic)) (ret :: get_args args) (ret2 :: get_args args2); e with | Unify_error _ | Invalid_argument("List.iter2") -> mk_cast to_t e)
       | _, _ ->
         do_unsafe_cast ()
   
@@ -4269,10 +4386,12 @@ struct
     It will handle both TCall(TField) and TCall by receiving a texpr option field: e
     Also it will transform the type parameters with greal_type_param and make 
     
+    handle_impossible_tparam - should cases where the type parameter is impossible to be determined from the called parameters be Dynamic?
+    e.g. static function test<T>():T {}
   *)
   
   (* match e.eexpr with | TCall( ({ eexpr = TField(ef, f) }) as e1, elist ) -> *)
-  let handle_type_parameter gen e e1 ef f elist =
+  let handle_type_parameter gen e e1 ef f elist impossible_tparam_is_dynamic =
     (* the ONLY way to know if this call has parameters is to analyze the calling field. *)
     (* To make matters a little worse, on both C# and Java only in some special cases that type parameters will be used *)
     (* Namely, when using reflection type parameters are useless, of course. This also includes anonymous types *)
@@ -4327,7 +4446,7 @@ struct
                   handle_cast gen ({ ecall with eexpr = TCall({ e1 with eexpr = TField(ef, f) }, elist )  }) (gen.greal_type ecall.etype) (gen.greal_type ret)
                 )
               | _ ->
-                let params = TypeParams.infer_params gen ecall.epos (get_fun cf.cf_type) (get_fun e1.etype) cf.cf_params in
+                let params = TypeParams.infer_params gen ecall.epos (get_fun cf.cf_type) (get_fun e1.etype) cf.cf_params impossible_tparam_is_dynamic in
                 let args, ret = get_args actual_t in
                 let actual_t = TFun(List.map (fun (n,o,t) -> (n,o,gen.greal_type t)) args, gen.greal_type ret) in
                 
@@ -4354,7 +4473,7 @@ struct
             let args, ret = get_args (efield.ef_type) in
             handle_cast gen { ecall with eexpr = TCall({ e1 with eexpr = TEnumField(en, f) }, List.map2 (fun param (_,_,t) -> handle_cast gen param (gen.greal_type t) (gen.greal_type param.etype)) elist args) } (gen.greal_type ecall.etype) (gen.greal_type ret)
           | _ ->
-            let params = TypeParams.infer_params gen ecall.epos (get_fun efield.ef_type) (get_fun e1.etype) en.e_types in
+            let params = TypeParams.infer_params gen ecall.epos (get_fun efield.ef_type) (get_fun e1.etype) en.e_types impossible_tparam_is_dynamic in
             let args, ret = get_args efield.ef_type in
             let actual_t = TFun(List.map (fun (n,o,t) -> (n,o,gen.greal_type t)) args, gen.greal_type ret) in
             (* 
@@ -4392,7 +4511,7 @@ struct
   (* end of type parameter handling *)
   (* ****************************** *)
   
-  let default_implementation gen maybe_empty_t =
+  let default_implementation gen maybe_empty_t impossible_tparam_is_dynamic =
     
     let current_ret_type = ref None in
     
@@ -4416,7 +4535,7 @@ struct
         | TBinop ( (Ast.OpAssignOp _ as op),e1,e2) ->
           { e with eexpr = TBinop(op, Type.map_expr run e1, handle (run e2) e1.etype e2.etype) }
         | TField(ef, f) ->
-          handle_type_parameter gen None e (run ef) f []
+          handle_type_parameter gen None e (run ef) f [] impossible_tparam_is_dynamic
         | TArrayDecl el ->
           let et = e.etype in
           let base_type = match follow et with
@@ -4427,7 +4546,7 @@ struct
         | TCall( ({ eexpr = TField({ eexpr = TLocal(v) },_) } as tf), params ) when String.get v.v_name 0 = '_' &&String.get v.v_name 1 = '_' && Hashtbl.mem gen.gspecial_vars v.v_name ->
           { e with eexpr = TCall(tf, List.map run params) }
         | TCall( ({ eexpr = TField(ef, f) }) as e1, elist ) ->
-          handle_type_parameter gen (Some e) (e1) (run ef) f (List.map run elist)
+          handle_type_parameter gen (Some e) (e1) (run ef) f (List.map run elist) impossible_tparam_is_dynamic
           
         | TCall (ef, eparams) ->
           (match ef.etype with
@@ -8233,8 +8352,9 @@ end;;
     On languages that do not support goto, a custom solution must be enforced
   
   dependencies:
-    We assume that no loop will be found at the condition, nor break will be found at switch "cases", so it's better to execute it after ExprUnwrap
-    But it's very unlikely and probably a justifiable error if such an expression is found
+    Since UnreachableCodeElimination must run before it, and Unreachable should be one of the
+    very last filters to run, we will make a fixed value which runs after UnreachableCodeElimination
+    (meaning: it's the very last filter)
   
 *)
 
@@ -8243,7 +8363,7 @@ struct
 
   let name = "switch_break_synf"
   
-  let priority = solve_deps name []
+  let priority = min_dep -. 150.0
   
   type add_to_block_api = texpr->bool->unit
   
@@ -8334,6 +8454,7 @@ end;;
       (http://docs.oracle.com/javase/specs/jls/se7/html/jls-14.html#jls-14.21) will be added
   
   dependencies:
+    This must run before SwitchBreakSynf (see SwitchBreakSynf dependecy value)
     This must be the LAST syntax filter to run. It expects ExpressionUnwrap to have run correctly, since this will only work for source-code based targets
   
 *)

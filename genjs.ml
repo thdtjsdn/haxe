@@ -438,7 +438,7 @@ and gen_expr ctx e =
 		| _ ->
 			print ctx "($_=";
 			gen_value ctx x;
-			print ctx ",$bind($_,$_.%s)" s)
+			print ctx ",$bind($_,$_.%s))" s)
 	| TTypeExpr t ->
 		spr ctx (ctx.type_accessor t)
 	| TParenthesis e ->
@@ -1195,7 +1195,7 @@ let generate com =
 		print ctx "})()";
 		newline ctx;
 	end;
-	if com.debug then write_mappings ctx else try Sys.remove (com.file ^ ".map") with _ -> ();
+	if com.debug then write_mappings ctx else (try Sys.remove (com.file ^ ".map") with _ -> ());
 	let ch = open_out_bin com.file in
 	output_string ch (Buffer.contents ctx.buf);
 	close_out ch);
