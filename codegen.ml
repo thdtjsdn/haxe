@@ -465,10 +465,12 @@ let on_inherit ctx c p h =
 	Adds member field initializations as assignments to the constructor
 *)
 let add_field_inits com c =
-	let rec can_init_inline cf e = match com.platform with
-		| Flash8 -> true
-		| Flash when Common.defined com "as3" -> true
-		| Php when (match cf.cf_kind with Var({v_write = AccCall _}) -> false | _ -> true) -> true
+	let rec can_init_inline cf e = match com.platform,e.eexpr with
+		| Flash8,_ -> true
+		| Flash,_ when Common.defined com "as3" -> true
+		| Php, TTypeExpr _ -> false
+		| Php,_ ->
+			(match cf.cf_kind with Var({v_write = AccCall _}) -> false | _ -> true)
 		| _ -> false
 	in
 	let inits = List.filter (fun cf ->
@@ -539,7 +541,7 @@ let on_generate ctx t =
 		List.iter (fun m ->
 			match m with
 			| ":native",[Ast.EConst (Ast.String name),p],mp ->
-				c.cl_meta <- (":real",[Ast.EConst (Ast.String (s_type_path c.cl_path)),p],mp) :: c.cl_meta;
+				c.cl_meta <- (":realPath",[Ast.EConst (Ast.String (s_type_path c.cl_path)),p],mp) :: c.cl_meta;
 				c.cl_path <- parse_path name;
 			| _ -> ()
 		) c.cl_meta;
@@ -579,7 +581,7 @@ let on_generate ctx t =
 		List.iter (fun m ->
 			match m with
 			| ":native",[Ast.EConst (Ast.String name),p],mp ->
-				e.e_meta <- (":real",[Ast.EConst (Ast.String (s_type_path e.e_path)),p],mp) :: e.e_meta;
+				e.e_meta <- (":realPath",[Ast.EConst (Ast.String (s_type_path e.e_path)),p],mp) :: e.e_meta;
 				e.e_path <- parse_path name;
 			| _ -> ()
 		) e.e_meta;

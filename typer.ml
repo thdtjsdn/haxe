@@ -576,7 +576,7 @@ let get_this ctx p =
 		if ctx.untyped then display_error ctx "Cannot access this in 'untyped' mode : use either '__this__' or var 'me = this' (transitional)" p;
 		let v = (match ctx.vthis with
 			| None ->
-				let v = alloc_var "me" ctx.tthis in
+				let v = gen_local ctx ctx.tthis in
 				ctx.vthis <- Some v;
 				v
 			| Some v -> v
@@ -960,6 +960,7 @@ let rec type_binop ctx op e1 e2 p =
 		| KUnk | KDyn | KParam _ | KOther ->
 			let std = type_type ctx ([],"Std") e.epos in
 			let acc = acc_get ctx (type_field ctx std "string" e.epos MCall) e.epos in
+			ignore(follow acc.etype);
 			let acc = (match acc.eexpr with TClosure (e,f) -> { acc with eexpr = TField (e,f) } | _ -> acc) in
 			make_call ctx acc [e] ctx.t.tstring e.epos
 		| KInt | KFloat | KString -> e
@@ -1741,7 +1742,7 @@ and type_expr ctx ?(need_val=true) (e,p) =
 		mk (TObjectDecl (List.rev fields)) (TAnon { a_fields = types; a_status = x }) p
 	| EArrayDecl el ->
 		let el = List.map (type_expr ctx) el in
-		let t = unify_min ctx el in
+		let t = try unify_min_raise ctx el with Error (Unify l,p) -> if Common.defined ctx.com "haxe3" then raise (Error (Unify l, p)) else t_dynamic in
 		mk (TArrayDecl el) (ctx.t.tarray t) p
 	| EVars vl ->
 		let vl = List.map (fun (v,t,e) ->
@@ -2182,7 +2183,9 @@ and build_call ctx acc el twith p =
 			| _ -> assert false)
 		| _ -> assert false)
 	| AKMacro (ethis,f) ->
-		(match ethis.eexpr with
+		if ctx.macro_depth > 300 then error "Stack overflow" p;
+		ctx.macro_depth <- ctx.macro_depth + 1;
+		let e = (match ethis.eexpr with
 		| TTypeExpr (TClassDecl c) ->
 			(match ctx.g.do_macro ctx MExpr c.cl_path f.cf_name el p with
 			| None -> type_expr ctx (EConst (Ident "null"),p)
@@ -2202,7 +2205,9 @@ and build_call ctx acc el twith p =
 						| Some (csup,_) -> loop csup
 				in
 				loop c
-			| _ -> assert false))
+			| _ -> assert false)) in
+		ctx.macro_depth <- ctx.macro_depth - 1;
+		e;
 	| AKNo _ | AKSet _ ->
 		ignore(acc_get ctx acc p);
 		assert false
@@ -2364,16 +2369,20 @@ let get_main ctx =
 		Some (mk (TCall (mk (TField (emain,"main")) ft null_pos,[])) r null_pos)
 
 let rec finalize ctx =
-	let delays = ctx.g.delayed in
-	ctx.g.delayed <- [];
-	match delays with
-	| [] when ctx.com.dead_code_elimination ->
+	match ctx.g.delayed.df_normal,ctx.g.delayed.df_late with
+	| [],[] when ctx.com.dead_code_elimination ->
 		ignore(get_main ctx);
-		if dce_finalize ctx && ctx.g.delayed = [] then dce_optimize ctx else finalize ctx
-	| [] ->
+		if dce_finalize ctx && ctx.g.delayed.df_normal = [] && ctx.g.delayed.df_late = [] then dce_optimize ctx else finalize ctx
+	| [],[] ->
 		(* at last done *)
 		()
-	| l ->
+	| [],l ->
+		(* normal done, but late remains *)
+		ctx.g.delayed.df_late <- [];
+		List.iter (fun f -> f()) l;
+		finalize ctx		
+	| l,_ ->
+		ctx.g.delayed.df_normal <- [];
 		List.iter (fun f -> f()) l;
 		finalize ctx
 
@@ -2574,6 +2583,7 @@ let make_macro_api ctx p =
 		| TEnumDecl e -> TEnum (e,List.map snd e.e_types)
 		| TTypeDecl t -> TType (t,List.map snd t.t_types)
 	in
+	let add_types () = Hashtbl.iter (fun v m -> Interp.add_types (Interp.get_ctx()) m.m_types) ctx.g.modules in
 	{
 		Interp.pos = p;
 		Interp.get_com = (fun() -> ctx.com);
@@ -2581,7 +2591,9 @@ let make_macro_api ctx p =
 			typing_timer ctx (fun() ->
 				let path = parse_path s in
 				try
-					Some (Typeload.load_instance ctx { tpackage = fst path; tname = snd path; tparams = []; tsub = None } p true)
+					let m = Some (Typeload.load_instance ctx { tpackage = fst path; tname = snd path; tparams = []; tsub = None } p true) in
+					if ctx.in_macro then add_types();
+					m
 				with Error (Module_not_found _,p2) when p == p2 ->
 					None
 			)
@@ -2589,7 +2601,9 @@ let make_macro_api ctx p =
 		Interp.get_module = (fun s ->
 			typing_timer ctx (fun() ->
 				let path = parse_path s in
-				List.map make_instance (Typeload.load_module ctx path p).m_types
+				let m = List.map make_instance (Typeload.load_module ctx path p).m_types in
+				if ctx.in_macro then add_types();
+				m
 			)
 		);
 		Interp.on_generate = (fun f ->
@@ -2971,7 +2985,10 @@ let rec create com is_macro_ctx =
 			modules = Hashtbl.create 0;
 			types_module = Hashtbl.create 0;
 			type_patches = Hashtbl.create 0;
-			delayed = [];
+			delayed = {
+				df_normal = [];
+				df_late = [];
+			};
 			doinline = not (Common.defined com "no_inline" || com.display);
 			hook_generate = [];
 			get_build_infos = (fun() -> None);
@@ -2983,6 +3000,7 @@ let rec create com is_macro_ctx =
 			do_optimize = Optimizer.reduce_expression;
 			do_build_instance = Codegen.build_instance;
 		};
+		macro_depth = 0;
 		untyped = false;
 		curfun = FStatic;
 		in_loop = false;
