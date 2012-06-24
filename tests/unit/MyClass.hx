@@ -126,3 +126,60 @@ class InitProperties {
 	
 	public function new() { }
 }
+
+class ParamConstraintsClass {
+	public function new() { }
+	static public function staticSingle< A:Base > (a:A):A { return a; }
+	public function memberSingle< A:Base > (a:A):A { return a; }
+	public function memberMultiple < A:(Base, I1) > (a:A):A { return a; }
+	public function memberComplex < A:I1, B:List<A> > (a:A, b:B) { return b; }
+	public function memberBasic < A:String, B:Array<A> > (a:A, b:B) { return b[0]; }
+	
+	@:overload(function< A, B:Array<A> > (a:A, b:B):Void { } )
+	public function memberOverload<A,B>(a:String, b:String) { }
+}
+
+class ParamConstraintsClass2<T> {
+	public function new() { }
+	public function bind(t:T) { }
+	
+	public function check<A:Array<T>>(a:A) { }
+}
+
+class UsingBase {
+	static function privFunc(s:String) return s.toUpperCase()
+	static public function pupFunc(s:String) return s.toUpperCase()
+}
+
+using MyClass.UsingBase;
+using MyClass.UsingChild2;
+using MyClass.UsingChild1;
+
+class UsingChild1 extends UsingBase {
+	static public function test() {
+		return "foo".pupFunc() + "foo".privFunc() + "FOO".siblingFunc();
+	}
+	
+	static function siblingFunc(s:String) return s.toLowerCase()
+}
+
+class UsingChild2 extends UsingBase {
+	static public function test() {
+		#if !macro
+		TestType.typeError("foo".siblingFunc());
+		#end
+		return "foo".siblingFunc();
+	}
+	
+	static public function siblingFunc(s:String) return s.toUpperCase()
+}
+
+class UsingUnrelated {
+	static public function test() {
+		#if !macro
+		TestType.typeError("foo".privFunc());
+		TestType.typeError("foo".siblingFunc());
+		#end
+		return "foo".pupFunc() + "foo".siblingFunc();
+	}
+}

@@ -34,6 +34,7 @@ let parse_file com file p =
 
 let parse_hook = ref parse_file
 let type_module_hook = ref (fun _ _ _ -> None)
+let type_function_params_rec = ref (fun _ _ _ _ -> assert false)
 let return_partial_type = ref false
 
 let type_function_param ctx t e opt p =
@@ -57,6 +58,9 @@ let apply_macro ctx mode path el p =
 		| _ -> error "Invalid macro path" p
 	) in
 	ctx.g.do_macro ctx mode cpath meth el p
+
+let mark_used_field ctx f =
+	if ctx.com.dead_code_elimination && not (has_meta ":?used" f.cf_meta) then f.cf_meta <- (":?used",[],f.cf_pos) :: f.cf_meta
 
 (** since load_type_def and load_instance are used in PASS2, they should not access the structure of a type **)
 
@@ -300,14 +304,21 @@ and init_meta_overloads ctx cf =
 		| (":overload",[(EFunction (fname,f),p)],_)  ->
 			if fname <> None then error "Function name must not be part of @:overload" p;
 			(match f.f_expr with Some (EBlock [], _) -> () | _ -> error "Overload must only declare an empty method body {}" p);
+			let old = ctx.type_params in
+			(match cf.cf_params with
+			| [] -> ()
+			| l -> ctx.type_params <- List.filter (fun t -> not (List.mem t l)) ctx.type_params);
+			let params = (!type_function_params_rec) ctx f cf.cf_name p in
+			ctx.type_params <- params @ ctx.type_params;
 			let topt = function None -> error "Explicit type required" p | Some t -> load_complex_type ctx p t in
 			let args = List.map (fun (a,opt,t,_) ->  a,opt,topt t) f.f_args in
-			overloads := (args,topt f.f_type) :: !overloads;
+			overloads := (args,topt f.f_type, params) :: !overloads;
+			ctx.type_params <- old;
 			false
 		| _ ->
 			true
 	) cf.cf_meta;
-	cf.cf_overloads <- List.map (fun (args,ret) -> { cf with cf_type = TFun (args,ret) }) (List.rev !overloads)
+	cf.cf_overloads <- List.map (fun (args,ret,params) -> { cf with cf_type = TFun (args,ret); cf_params = params }) (List.rev !overloads)
 
 let hide_types ctx =
 	let old_locals = ctx.local_types in
@@ -389,14 +400,13 @@ let check_overriding ctx c p () =
 			display_error ctx ("Field " ^ i ^ " is declared 'override' but doesn't override any field") p)
 	| Some (csup,params) ->
 		PMap.iter (fun i f ->
+			let p = f.cf_pos in
 			try
 				let t , f2 = raw_class_field (fun f -> f.cf_type) csup i in
 				(* allow to define fields that are not defined for this platform version in superclass *)
 				(match f2.cf_kind with
 				| Var { v_read = AccRequire _ } -> raise Not_found;
 				| _ -> ());
-				ignore(follow f.cf_type); (* force evaluation *)
-				let p = (match f.cf_expr with None -> p | Some e -> e.epos) in
 				if not (List.mem i c.cl_overrides) then
 					display_error ctx ("Field " ^ i ^ " should be declared with 'override' since it is inherited from superclass") p
 				else if not f.cf_public && f2.cf_public then
@@ -439,6 +449,15 @@ let rec check_interface ctx c p intf params =
 		try
 			let t2, f2 = class_field_no_interf c i in
 			ignore(follow f2.cf_type); (* force evaluation *)
+			(* we have to make sure that the field is mark as used, which might not be the case for inline fields *)
+			mark_used_field ctx f2;
+			(* this is also true for property accessors *)
+			(match f2.cf_kind with
+			| Var v ->
+				let mark s = try mark_used_field ctx (PMap.find s c.cl_fields) with Not_found -> () in
+				(match v.v_read with AccCall s -> mark s | _ -> ());
+				(match v.v_write with AccCall s -> mark s | _ -> ())
+			| Method m -> ());
 			let p = (match f2.cf_expr with None -> p | Some e -> e.epos) in
 			let mkind = function
 				| MethNormal | MethInline -> 0
@@ -517,7 +536,7 @@ let set_heritance ctx c herits p =
 	let process_meta csup =
 		List.iter (fun m ->
 			match m with
-			| ":final", _, _ -> if not (Type.has_meta ":hack" c.cl_meta) then error "Cannot extend a final class" p;
+			| ":final", _, _ -> if not (Type.has_meta ":hack" c.cl_meta || c.cl_kind = KTypeParameter) then error "Cannot extend a final class" p;
 			| ":autoBuild", el, p -> c.cl_meta <- (":build",el,p) :: m :: c.cl_meta;
 			| _ -> ()
 		) csup.cl_meta
@@ -593,34 +612,9 @@ let type_type_params ctx path get_params p (n,flags) =
 		delay ctx (fun () -> ignore(!r()));
 		n, TLazy r
 
-let type_function_params ctx fd fname fmeta p =
+let type_function_params ctx fd fname p =
 	let params = ref [] in
 	params := List.map (fun (n,flags) ->
-		(match flags with
-		| [] -> ()
-		| _ ->
-			(** look if the type is contained into arguments **)
-			let rec lookup_type t =
-				match t with
-				| CTPath { tpackage = []; tname = n2 } when n = n2 -> true
-				| CTPath p -> List.exists lookup_tparam p.tparams
-				| CTFunction (cl,r) -> List.exists lookup_type (r::cl)
-				| CTExtend (_,fl) | CTAnonymous fl -> List.exists lookup_cfield fl
-				| CTOptional t | CTParent t -> lookup_type t						
-			and lookup_cfield f =
-				match f.cff_kind with
-				| FVar (None,_) -> false
-				| FProp (_,_,t,_) | FVar (Some t,_) -> lookup_type t
-				| FFun f -> lookup_fun f
-			and lookup_fun f =
-				List.exists (fun (_,_,t,_) -> match t with None -> false | Some t -> lookup_type t) f.f_args || 
-				List.exists (fun (_,tl) -> List.exists lookup_type tl) f.f_params ||
-				(match f.f_type with None -> false | Some t -> lookup_type t)
-			and lookup_tparam = function
-				| TPType t -> lookup_type t
-				| TPExpr _ -> false
-			in
-			if lookup_fun { fd with f_type = None; f_params = [] } && not (has_meta ":allowConstraint" fmeta) then error "This notation is not allowed because it can't be checked" p);
 		type_type_params ctx ([],fname) (fun() -> !params) p (n,flags)
 	) fd.f_params;
 	!params
@@ -697,7 +691,7 @@ let init_core_api ctx c =
 			let com2 = Common.clone ctx.com in
 			Common.define com2 "core_api";
 			com2.class_path <- ctx.com.std_path;
-			let ctx2 = ctx.g.do_create com2 ctx.in_macro in
+			let ctx2 = ctx.g.do_create com2 in
 			ctx.g.core_api <- Some ctx2;
 			ctx2
 		| Some c ->
@@ -1015,7 +1009,7 @@ let init_class ctx c p herits fields =
 			let delay = bind_var ctx cf e stat inline in
 			f, false, cf, delay
 		| FFun fd ->
-			let params = type_function_params ctx fd f.cff_name f.cff_meta p in
+			let params = type_function_params ctx fd f.cff_name p in
 			if inline && c.cl_interface then error "You can't declare inline methods in interfaces" p;
 			let is_macro = (is_macro && stat) || has_meta ":macro" f.cff_meta in
 			let f, stat, fd = if not is_macro || stat then
@@ -1593,3 +1587,6 @@ let load_module ctx m p =
 	) in
 	add_dependency ctx.current m2;
 	m2
+
+;;
+type_function_params_rec := type_function_params

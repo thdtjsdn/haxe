@@ -164,6 +164,8 @@ let debug_mode = ref false
 let trace s = if !debug_mode then print_endline s else ()
 let timer name = if !debug_mode then Common.timer name else fun () -> ()
 
+let is_string t = match follow t with | TInst({ cl_path = ([], "String") }, []) -> true | _ -> false
+
 (* helper function for creating Anon types of class / enum modules *)
 
 let anon_of_classtype cl =
@@ -1883,7 +1885,6 @@ struct
   let priority_as_synf = 100.0 (*solve_deps name [DBefore ExpressionUnwrap.priority]*)
   
   let abstract_implementation gen (should_change:texpr->bool) (equals_handler:texpr->texpr->texpr) (dyn_plus_handler:texpr->texpr->texpr->texpr) (compare_handler:texpr->texpr->texpr) =
-    let is_string t = match follow t with | TInst({ cl_path = ([], "String") }, []) -> true | _ -> false in
     
     let get_etype_one e =
       match follow e.etype with
@@ -3895,7 +3896,7 @@ struct
               let name = String.concat "." ((fst cl.cl_path) @ [snd cl.cl_path; original_name]) (* explicitly define it *) in
               let cast_cf = create_cast_cfield gen cl name in
               
-              cl.cl_ordered_fields <- cast_cf :: cl.cl_ordered_fields;
+              (if not cl.cl_interface then cl.cl_ordered_fields <- cast_cf :: cl.cl_ordered_fields);
               let iface_cf = mk_class_field original_name cast_cf.cf_type false cast_cf.cf_pos (Method MethNormal) cast_cf.cf_params in
               
               iface_cf.cf_type <- cast_cf.cf_type;
@@ -4090,6 +4091,10 @@ struct
     | TMono _ | TLazy _ -> t_dynamic
     | t -> t
   
+  (* 
+    this has a slight change from the type.ml version, in which it doesn't 
+    change a TMono into the other parameter
+  *)
   let rec type_eq gen param a b =
     if a == b then
       ()
@@ -4143,6 +4148,13 @@ struct
         ()
       else
         Type.error [cannot_unify a b]
+  
+  let type_iseq gen a b =
+    try
+      type_eq gen EqStrict a b;
+      true
+    with
+      Unify_error _ -> false
   
   (* Helpers for cast handling *)
   (* will return true if 'super' is a superclass of 'cl' or if cl implements super or if they are the same class *)
@@ -4359,7 +4371,7 @@ struct
       | TAnon (a_to), TAnon (a_from) ->
         if a_to == a_from then
           e
-        else if type_iseq to_t from_t then (* FIXME apply unify correctly *)
+        else if type_iseq gen to_t from_t then (* FIXME apply unify correctly *)
           e
         else
           mk_cast to_t e
@@ -4534,6 +4546,9 @@ struct
         | TBinop ( (Ast.OpAssign as op),e1,e2)
         | TBinop ( (Ast.OpAssignOp _ as op),e1,e2) ->
           { e with eexpr = TBinop(op, Type.map_expr run e1, handle (run e2) e1.etype e2.etype) }
+        (* this is an exception so we can avoid infinite loop on Std.String and haxe.lang.Runtime.toString(). It also takes off unnecessary casts to string *)
+        | TBinop ( Ast.OpAdd, ( { eexpr = TCast(e1, _) } as e1c), e2 ) when is_string e1c.etype && is_string e2.etype ->
+          { e with eexpr = TBinop( Ast.OpAdd, run e1, run e2 ) }
         | TField(ef, f) ->
           handle_type_parameter gen None e (run ef) f [] impossible_tparam_is_dynamic
         | TArrayDecl el ->
@@ -4554,7 +4569,7 @@ struct
               handle ({ e with eexpr = TCall(run ef, List.map2 (fun param (_,_,t) -> handle (run param) t param.etype) eparams p) }) e.etype ret
             | _ -> Type.map_expr run e
           )
-        | TNew (cl, tparams, [ maybe_empty ]) when is_some maybe_empty_t && type_iseq (get maybe_empty_t) maybe_empty.etype ->
+        | TNew (cl, tparams, [ maybe_empty ]) when is_some maybe_empty_t && type_iseq gen (get maybe_empty_t) maybe_empty.etype ->
           { e with eexpr = TNew(cl, tparams, [ maybe_empty ]); etype = TInst(cl, tparams) }
         | TNew (cl, tparams, eparams) ->
           let get_f t =
@@ -4568,6 +4583,12 @@ struct
                 | Some (cls,tl) -> 
                   get_ctor_p cls (List.map (apply_params cls.cl_types p) tl)
                 | None -> TFun([],gen.gcon.basic.tvoid)
+          in
+          
+          let handle = if gen.gcon.platform = Java && List.length eparams = 1 then
+            (fun e t1 t2 -> mk_cast (gen.greal_type t1) e)
+          else
+            handle
           in
           
           (* try / with because TNew might be overloaded *)
@@ -7190,6 +7211,20 @@ struct
     in
     closure_fun
     
+  let get_closure_func ctx closure_cl =
+    let gen = ctx.rcf_gen in
+    let basic = gen.gcon.basic in
+    let closure_func eclosure e field is_static =
+      { eclosure with 
+        eexpr = TNew(closure_cl, [], [ 
+          e; 
+          { eexpr = TConst(TString field); etype = basic.tstring; epos = eclosure.epos }
+        ] @ (
+          if ctx.rcf_optimize then [ { eexpr = TConst(TInt (hash_field_i32 ctx eclosure.epos field)); etype = basic.tint; epos = eclosure.epos } ] else [] 
+        ))
+      }
+    in
+    closure_func
   
   (* 
       main expr -> field expr -> field string -> possible set expr -> should_throw_exceptions -> changed expression
@@ -8573,10 +8608,10 @@ struct
           let last_has_break = !has_break in
           has_break := false;
           
-          let changed_block, kind = process_expr block in
+          let changed_block, _ = process_expr block in
           has_break := last_has_break;
           let expr = { expr with eexpr = TFor(var, cond, changed_block) } in
-          return_loop expr kind
+          return_loop expr Normal
         | TIf(cond, eif, None) ->
           if java_mode then
             match get_constant_expr cond with
@@ -8604,13 +8639,13 @@ struct
               | Some (TBool false), _ ->
                 has_break := last_has_break;
                 do_warn expr.epos;
-                null expr.etype expr.epos, k
+                null expr.etype expr.epos, Normal
               | _ ->
                 has_break := last_has_break;
-                return_loop { expr with eexpr = TWhile(cond,block,flag) } k
+                return_loop { expr with eexpr = TWhile(cond,block,flag) } Normal
           else begin
             has_break := last_has_break;
-            return_loop { expr with eexpr = TWhile(cond,block,flag) } k
+            return_loop { expr with eexpr = TWhile(cond,block,flag) } Normal
           end
         | TSwitch(cond, el_e_l, None) ->
           { expr with eexpr = TSwitch(cond, List.map (fun (el, e) -> (el, handle_case (process_expr e))) el_e_l, None) }, Normal
