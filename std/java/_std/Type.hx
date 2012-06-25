@@ -38,14 +38,10 @@ enum ValueType {
 @:core_api class Type {
 	
 	@:functionBody('
-		if (o instanceof java.lang.Enum || o instanceof haxe.lang.Enum)
+		if (o instanceof haxe.lang.DynamicObject || o instanceof java.lang.Class)
 			return null;
-		
-		java.lang.Class<T> ret = (java.lang.Class<T>) o.getClass();
-		String name = ret.getName();
-		if (name == "java.lang.Object" || name == "haxe.lang.DynamicObject" || name == "java.lang.Class")
-			return null;
-		return ret;
+			
+		return = (java.lang.Class<T>) o.getClass();
 	')
 	public static function getClass<T>( o : T ) : Class<T> untyped 
 	{
@@ -64,7 +60,7 @@ enum ValueType {
 	
 	@:functionBody('
 		java.lang.Class cl = (c == null) ? null : c.getSuperclass();
-		if (cl != null && cl.getName() != "haxe.lang.HxObject")
+		if (cl != null && !cl.getName().equals("haxe.lang.HxObject") && cl.getName().equals("java.lang.Object") )
 			return cl;
 		return null;
 	')
@@ -83,7 +79,6 @@ enum ValueType {
 			case "int", "java.lang.Integer": "Int";
 			case "double", "java.lang.Double": "Float";
 			case "java.lang.String": "String";
-			case "boolean", "java.lang.Boolean": "Bool";
 			default: name;
 		}
 	}
@@ -247,10 +242,10 @@ enum ValueType {
 	@:functionBody('
 		if (params == null) 
 		{
-			T ret = (T) haxe.lang.Runtime.slowGetField(e, constr, false);
+			java.lang.Object ret = haxe.lang.Runtime.slowGetField(e, constr, false);
 			if (ret instanceof haxe.lang.Function)
 				throw haxe.lang.HaxeException.wrap("Constructor " + constr + " needs parameters");
-			return ret;
+			return (T) ret;
 		} else {
 			return (T) haxe.lang.Runtime.slowCallField(e, constr, params);
 		}
@@ -260,19 +255,9 @@ enum ValueType {
 		return null;
 	}
 	
-	@:functionBody('
-		/*if (params == null) {
-			T ret = (T) e.__hx_getField(index + "", false, false, false);
-			if (ret instanceof haxe.lang.Function)
-				throw haxe.lang.HaxeException.wrap("Constructor " + index + " needs parameters");
-			return ret;
-		} else {
-			return (T)e.__hx_invokeField(index + "", false, params);
-		}*/
-		return null; //TODO
-	')
 	public static function createEnumIndex<T>( e : Enum<T>, index : Int, ?params : Array<Dynamic> ) : T {
-		return null;
+		var constr = getEnumConstructs(e);
+		return createEnum(e, constr[index], params);
 	}
 	
 	@:functionBody('
