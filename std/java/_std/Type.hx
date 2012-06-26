@@ -41,7 +41,7 @@ enum ValueType {
 		if (o instanceof haxe.lang.DynamicObject || o instanceof java.lang.Class)
 			return null;
 			
-		return = (java.lang.Class<T>) o.getClass();
+		return (java.lang.Class<T>) o.getClass();
 	')
 	public static function getClass<T>( o : T ) : Class<T> untyped 
 	{
@@ -60,7 +60,7 @@ enum ValueType {
 	
 	@:functionBody('
 		java.lang.Class cl = (c == null) ? null : c.getSuperclass();
-		if (cl != null && !cl.getName().equals("haxe.lang.HxObject") && cl.getName().equals("java.lang.Object") )
+		if (cl != null && !cl.getName().equals("haxe.lang.HxObject") && !cl.getName().equals("java.lang.Object") )
 			return cl;
 		return null;
 	')
@@ -345,6 +345,12 @@ enum ValueType {
 		return null;
 	}
 
+	@:functionBody('
+			if (a instanceof haxe.lang.Enum)
+				return a.equals(b);
+			else
+				return haxe.lang.Runtime.eq(a, b);
+	')
 	public static function enumEq<T>( a : T, b : T ) : Bool untyped 
 	{
 		return a.equals(b);

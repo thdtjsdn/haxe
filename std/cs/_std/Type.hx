@@ -146,7 +146,7 @@ enum ValueType {
 	{
 		var t:system.Type = Lib.toNativeType(cl);
 		var ctors = t.GetConstructors();
-		return Runtime.callMethod(t, cast ctors, ctors.Length, args);
+		return Runtime.callMethod(null, cast ctors, ctors.Length, args);
 	}
 
 	public static function createEmptyInstance<T>( cl : Class<T> ) : T 
@@ -183,6 +183,8 @@ enum ValueType {
         System.Reflection.MemberInfo[] mis = c.GetMembers(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly | System.Reflection.BindingFlags.Instance);
         for (int i = 0; i < mis.Length; i++)
         {
+			if (mis[i] is System.Reflection.PropertyInfo)
+                continue;
 			string n = mis[i].Name;
 			if (!n.StartsWith("__hx_") && n[0] != \'.\')
 				ret.push(mis[i].Name);
@@ -239,7 +241,10 @@ enum ValueType {
                 {
                     case System.TypeCode.Boolean: return ValueType.TBool;
                     case System.TypeCode.Double:
-                        return ValueType.TFloat;
+						if (vc.ToDouble(null) == vc.ToInt32(null))
+							return ValueType.TInt;
+						else
+							return ValueType.TFloat;
                     case System.TypeCode.Int32:
                         return ValueType.TInt;
                     default:
@@ -267,7 +272,13 @@ enum ValueType {
 	{
 		return null;
 	}
-
+	
+	@:functionBody('
+			if (a is haxe.lang.Enum)
+				return a.Equals(b);
+			else
+				return haxe.lang.Runtime.eq(a, b);
+	')
 	public static function enumEq<T>( a : T, b : T ) : Bool 
 	{
 		return untyped a.Equals(b);

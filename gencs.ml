@@ -130,7 +130,7 @@ struct
           in
           let obj = run obj in
           (match follow_module follow md with
-            | TClassDecl({ cl_path = ([], "Float") }) ->
+            | TClassDecl{ cl_path = ([], "Float") } ->
               (* on the special case of seeing if it is a Float, we need to test if both it is a float and if it is an Int *)
               let mk_is local =
                 mk_paren {
@@ -153,6 +153,15 @@ struct
                   }
               in
               ret
+            | TClassDecl{ cl_path = ([], "Int") } ->
+              {
+                eexpr = TCall(
+                  mk_static_field_access_infer runtime_cl "isInt" e.epos [],
+                  [ obj ]
+                );
+                etype = basic.tbool;
+                epos = e.epos
+              }
             | _ ->
               mk_is obj md
           )
@@ -244,6 +253,7 @@ struct
         | _ -> false
     in
     
+    let is_cl t = match gen.greal_type t with | TInst ( { cl_path = (["System"], "Type") }, [] ) -> true | _ -> false in
     
     let rec run e =
       match e.eexpr with 
@@ -319,6 +329,15 @@ struct
               epos = e1.epos
             }, [ run e2 ])
           }
+        
+        | TBinop ( (Ast.OpEq as op), e1, e2 )
+        | TBinop ( (Ast.OpNotEq as op), e1, e2 ) when is_cl e1.etype ->
+          let static = mk_static_field_access_infer (runtime_cl) "typeEq" e.epos [] in
+          let ret = { e with eexpr = TCall(static, [run e1; run e2]); } in
+          if op = Ast.OpNotEq then
+            { ret with eexpr = TUnop(Ast.Not, Ast.Prefix, ret) }
+          else
+            ret
         
         | _ -> Type.map_expr run e
     in
@@ -524,11 +543,15 @@ let configure gen =
   
   let ti64 = match ( get_type gen ([], "Int64") ) with | TTypeDecl t -> TType(t,[]) | _ -> assert false in
   
+  let ttype = get_cl ( get_type gen (["System"], "Type") ) in
+  
   let rec real_type t =
     let t = gen.gfollow#run_f t in
     let ret = match t with
       | TInst( { cl_path = (["haxe"], "Int32") }, [] ) -> gen.gcon.basic.tint
       | TInst( { cl_path = (["haxe"], "Int64") }, [] ) -> ti64
+      | TInst( { cl_path = ([], "Class") }, _ )
+      | TInst( { cl_path = ([], "Enum") }, _ ) -> TInst(ttype,[])
       | TEnum(_, [])
       | TInst(_, []) -> t
       | TInst(cl, params) when 
@@ -630,7 +653,6 @@ let configure gen =
       | TInst ({ cl_kind = KTypeParameter; cl_path=p }, []) -> snd p
       | TMono r -> (match !r with | None -> "object" | Some t -> t_s (run_follow gen t))
       | TInst ({ cl_path = [], "String" }, []) -> "string"
-      | TInst ({ cl_path = [], "Class" }, _) | TInst ({ cl_path = [], "Enum" }, _) -> "System.Type"
       | TEnum ({ e_path = p }, params) -> (path_s p)
       | TInst (({ cl_path = p } as cl), params) -> (path_param_s (TClassDecl cl) p params)
       | TType (({ t_path = p } as t), params) -> (path_param_s (TTypeDecl t) p params)
@@ -1552,7 +1574,6 @@ let configure gen =
     match real_type t with
       | TDynamic _ | TAnon _ | TMono _
       | TInst( { cl_kind = KTypeParameter }, _ )
-      | TInst( { cl_path = ([], "String") }, [] )
       | TInst( { cl_path = (["haxe";"lang"], "Null") }, _ ) -> true
       | _ -> false
   in
@@ -1620,10 +1641,20 @@ let configure gen =
   let hx_exception = get_cl (get_type gen (["haxe";"lang"], "HaxeException")) in
   let hx_exception_t = TInst(hx_exception, []) in
   
+  let rec is_exception t =
+    match follow t with
+      | TInst(cl,_) -> 
+        if cl == base_exception then
+          true
+        else
+          (match cl.cl_super with | None -> false | Some (cl,arg) -> is_exception (TInst(cl,arg)))
+      | _ -> false
+  in
+  
   TryCatchWrapper.configure gen 
   (
     TryCatchWrapper.traverse gen 
-      (fun t -> try unify t base_exception_t; false with | Unify_error _ -> true)
+      (fun t -> not (is_exception (real_type t)))
       (fun throwexpr expr ->
         let wrap_static = mk_static_field_access (hx_exception) "wrap" (TFun([("obj",false,t_dynamic)], base_exception_t)) expr.epos in
         { throwexpr with eexpr = TThrow { expr with eexpr = TCall(wrap_static, [expr]) }; etype = gen.gcon.basic.tvoid }
@@ -1697,7 +1728,14 @@ let configure gen =
   run_filters gen;
   (* after the filters have been run, add all hashed fields to FieldLookup *)
   
-  let hashes = Hashtbl.fold (fun i s acc -> (i,s) :: acc) rcf_ctx.rcf_hash_fields [] in
+  let normalize_i i =
+    let i = Int32.of_int (i) in
+    if i < Int32.zero then
+      Int32.logor (Int32.logand i (Int32.of_int 0x3FFFFFFF)) (Int32.shift_left Int32.one 30)
+    else i
+  in
+  
+  let hashes = Hashtbl.fold (fun i s acc -> (normalize_i i,s) :: acc) rcf_ctx.rcf_hash_fields [] in
   let hashes = List.sort (fun (i,s) (i2,s2) -> compare i i2) hashes in
   
   let flookup_cl = get_cl (get_type gen (["haxe";"lang"], "FieldLookup")) in
@@ -1709,7 +1747,7 @@ let configure gen =
     let fields = PMap.find "fields" cl.cl_statics in
     
     field_ids.cf_expr <- Some (change_array { 
-      eexpr = TArrayDecl(List.map (fun (i,s) -> { eexpr = TConst(TInt ( Int32.of_int i)); etype = basic.tint; epos = field_ids.cf_pos }) hashes);
+      eexpr = TArrayDecl(List.map (fun (i,s) -> { eexpr = TConst(TInt (i)); etype = basic.tint; epos = field_ids.cf_pos }) hashes);
       etype = basic.tarray basic.tint;
       epos = field_ids.cf_pos
     });

@@ -18,23 +18,23 @@ import system.Type;
 	public static object getField(haxe.lang.HxObject obj, string field, int fieldHash, bool throwErrors)
 	{
 		if (obj == null && !throwErrors) return null;
-		return obj.__hx_getField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors, false);
+		return obj.__hx_getField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors, false, false);
 	}
 	
 	public static double getField_f(haxe.lang.HxObject obj, string field, int fieldHash, bool throwErrors)
 	{
 		if (obj == null && !throwErrors) return 0.0;
-		return obj.__hx_getField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors);
+		return obj.__hx_getField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors, false);
 	}
 	
 	public static object setField(haxe.lang.HxObject obj, string field, int fieldHash, object value)
 	{
-		return obj.__hx_setField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value);
+		return obj.__hx_setField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value, false);
 	}
 	
 	public static double setField_f(haxe.lang.HxObject obj, string field, int fieldHash, double value)
 	{
-		return obj.__hx_setField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value);
+		return obj.__hx_setField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value, false);
 	}
 	
 	public static object callField(haxe.lang.HxObject obj, string field, int fieldHash, Array args)
@@ -92,8 +92,6 @@ import system.Type;
 				return v1.Equals(v2);
 			}
 			
-			//add here haxe.lang.Equatable test
-			
 			return false;
 	')
 	public static function eq(v1:Dynamic, v2:Dynamic):Bool
@@ -123,6 +121,19 @@ import system.Type;
 	public static function toInt(obj:Dynamic):Int
 	{
 		return 0;
+	}
+	
+	@:functionBody('
+			System.IConvertible cv1 = obj as System.IConvertible;
+			if (cv1 != null)
+			{
+				return cv1.ToDouble(null) == cv1.ToInt32(null);
+			}
+			return false;
+	')
+	public static function isInt(obj:Dynamic):Bool
+	{
+		return false;
 	}
 	
 	@:functionBody('
@@ -219,8 +230,8 @@ import system.Type;
 			System.Reflection.PropertyInfo prop = t.GetProperty(field, bf);
 			if (prop == null)
 			{
-				System.Reflection.MethodInfo m = t.GetMethod(field, bf);
-				if (m != null)
+				System.Reflection.MemberInfo[] m = t.GetMember(field, bf);
+				if (m.Length > 0)
 				{
 					return new haxe.lang.Closure(obj, field, 0);
 				} else {
@@ -395,7 +406,14 @@ import system.Type;
 			return haxe.lang.Runtime.unbox(retg);
 		}
 		
-		var ret = methods[0].Invoke(obj, oargs);
+		var m = methods[0];
+		if (obj == null && Std.is(m, system.reflection.ConstructorInfo))
+		{
+			var ret = cast(m, system.reflection.ConstructorInfo).Invoke(oargs);
+			return unbox(ret);
+		}
+		
+		var ret = m.Invoke(obj, oargs);
 		return unbox(ret);
 	}
 	
@@ -471,7 +489,7 @@ import system.Type;
 	
 		haxe.lang.HxObject hxObj = obj as haxe.lang.HxObject;
 		if (hxObj != null)
-			return hxObj.__hx_getField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors, false);
+			return hxObj.__hx_getField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors, false, false);
 		
 		return slowGetField(obj, field, throwErrors);
 	
@@ -485,7 +503,7 @@ import system.Type;
 	
 		haxe.lang.HxObject hxObj = obj as haxe.lang.HxObject;
 		if (hxObj != null)
-			return hxObj.__hx_getField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors);
+			return hxObj.__hx_getField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, throwErrors, false);
 		
 		return (double)slowGetField(obj, field, throwErrors);
 	
@@ -499,7 +517,7 @@ import system.Type;
 	
 		haxe.lang.HxObject hxObj = obj as haxe.lang.HxObject;
 		if (hxObj != null)
-			return hxObj.__hx_setField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value);
+			return hxObj.__hx_setField(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value, false);
 		
 		return slowSetField(obj, field, value);
 	
@@ -513,7 +531,7 @@ import system.Type;
 
 		haxe.lang.HxObject hxObj = obj as haxe.lang.HxObject;
 		if (hxObj != null)
-			return hxObj.__hx_setField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value);
+			return hxObj.__hx_setField_f(field, (fieldHash == 0) ? haxe.lang.FieldLookup.hash(field) : fieldHash, value, false);
 		
 		return (double)slowSetField(obj, field, value);
 	
@@ -528,6 +546,16 @@ import system.Type;
 		if (obj == null) 
 			return null;
 		return obj + "";
+	}
+	
+	@:functionBody('
+			if (t1 == null || t2 == null)
+				return t1 == t2;
+			return t1.Name.Equals(t2.Name);
+	')
+	public static function typeEq(t1:system.Type, t2:system.Type):Bool
+	{
+		return false;
 	}
 }
 
